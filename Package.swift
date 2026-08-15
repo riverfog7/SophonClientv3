@@ -5,6 +5,9 @@ import PackageDescription
 
 let package = Package(
   name: "SophonClientv3",
+  platforms: [
+    .macOS(.v13)
+  ],
   products: [
     .library(name: "SophonClientv3", type: .dynamic, targets: ["SophonClientv3"]),
     .library(name: "HYPAPIClient", targets: ["HYPAPIClient"]),
