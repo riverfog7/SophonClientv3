@@ -13,12 +13,18 @@ let package = Package(
     .library(name: "HYPAPIClient", targets: ["HYPAPIClient"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.2.0")
+    .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.2.0"),
+    .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.38.1"),
   ],
   targets: [
     // Targets are the basic building blocks of a package, defining a module or a test suite.
     // Targets can depend on other targets in this package and products from dependencies.
-    .target(name: "SophonClientv3", dependencies: ["HYPAPIClient"]),
+    .target(
+      name: "SophonClientv3",
+      dependencies: [
+        .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+        "HYPAPIClient",
+      ]),
     .target(name: "HYPAPIClient"),
     .executableTarget(
       name: "SophonCLI",
