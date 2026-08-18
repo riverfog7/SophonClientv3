@@ -5,7 +5,8 @@ import Testing
 @Test
 func testCNAPI() async throws {
   let client = try HYPAPIClient(
-    baseURL: HYPAPI_CN_BASE_URL, launcherID: HYPAPI_CN_LAUNCHER_ID)
+    baseURL: HYPAPI_CN_BASE_URL, sophonBaseURL: SOPHON_API_CN_BASE_URL,
+    launcherID: HYPAPI_CN_LAUNCHER_ID)
 
   let gameBranches = try await client.getGameBranches()
   #expect(gameBranches.game_branches.count > 0)
@@ -24,12 +25,22 @@ func testCNAPI() async throws {
   #expect(wpfPackages.findBy(biz: "hk4e_cn").count > 0)
   let gameScanInfo = try await client.getGameScanInfo()
   #expect(gameScanInfo.game_scan_info.count > 0)
+
+  for branch in gameBranches.game_branches {
+    let _ = try await client.getSophonBuildInfo(branch.main)
+    let _ = try await client.getSophonPatchBuildInfo(branch.main)
+    if branch.pre_download != nil {
+      let _ = try await client.getSophonBuildInfo(branch.pre_download!)
+      let _ = try await client.getSophonPatchBuildInfo(branch.pre_download!)
+    }
+  }
 }
 
 @Test
 func testOSAPI() async throws {
   let client = try HYPAPIClient(
-    baseURL: HYPAPI_OS_BASE_URL, launcherID: HYPAPI_OS_LAUNCHER_ID)
+    baseURL: HYPAPI_OS_BASE_URL, sophonBaseURL: SOPHON_API_OS_BASE_URL,
+    launcherID: HYPAPI_OS_LAUNCHER_ID)
 
   let gameBranches = try await client.getGameBranches()
   #expect(gameBranches.getGameSubBranch(biz: "nap_global", predownload: false) != nil)
@@ -46,4 +57,13 @@ func testOSAPI() async throws {
   #expect(wpfPackages.findBy(biz: "hk4e_global").count > 0)
   let gameScanInfo = try await client.getGameScanInfo()
   #expect(gameScanInfo.game_scan_info.count > 0)
+
+  for branch in gameBranches.game_branches {
+    let _ = try await client.getSophonBuildInfo(branch.main)
+    let _ = try await client.getSophonPatchBuildInfo(branch.main)
+    if branch.pre_download != nil {
+      let _ = try await client.getSophonBuildInfo(branch.pre_download!)
+      let _ = try await client.getSophonPatchBuildInfo(branch.pre_download!)
+    }
+  }
 }
