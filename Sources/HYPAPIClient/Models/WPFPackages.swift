@@ -1,8 +1,29 @@
+import Foundation
+
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
+
 public struct WPFPackageInfo: Decodable {
   public var version: String
-  public var url: String
+  public var url: URL
   public var md5: String
-  public var size: String
+  public var size: Int64
+
+  enum CodingKeys: CodingKey {
+    case version
+    case url
+    case md5
+    case size
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.version = try container.decode(String.self, forKey: .version)
+    self.url = try parseURL(try container.decode(String.self, forKey: .url))
+    self.md5 = try container.decode(String.self, forKey: .md5)
+    self.size = try convert(try container.decode(String.self, forKey: .size))
+  }
 }
 
 public struct WPFPackage: Decodable {

@@ -17,14 +17,8 @@ public class HYPAPIClient {
     retryInterval: Int = 5,
     session: URLSession = .shared
   ) throws {
-    guard let temp = URL(string: baseURL) else {
-      throw APIClientError.InvalidBaseURL(baseURL)
-    }
-    self.baseURL = temp
-    guard let temp = URL(string: sophonBaseURL) else {
-      throw APIClientError.InvalidBaseURL(sophonBaseURL)
-    }
-    self.sophonBaseURL = temp
+    self.baseURL = try parseURL(baseURL)
+    self.sophonBaseURL = try parseURL(sophonBaseURL)
 
     self.launcherID = launcherID
     self.session = session
