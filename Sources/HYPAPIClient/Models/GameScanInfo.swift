@@ -4,17 +4,26 @@ public struct GameExecutableInfo: Decodable {
 }
 
 public struct GameScanInfo: Decodable {
-  public var game_id: String
-  public var game_exe_list: [GameExecutableInfo]
+  public var gameID: String
+  public var gameExeList: [GameExecutableInfo]
+
+  enum CodingKeys: String, CodingKey {
+    case gameID = "game_id"
+    case gameExeList = "game_exe_list"
+  }
 }
 
 public struct GameScanInfos: Decodable {
-  public var game_scan_info: [GameScanInfo]
+  public var gameScanInfo: [GameScanInfo]
+
+  enum CodingKeys: String, CodingKey {
+    case gameScanInfo = "game_scan_info"
+  }
 
   public func getVersion(id gameID: String, md5: String) -> String? {
-    for scanInfo in game_scan_info {
-      if scanInfo.game_id == gameID {
-        for exeInfo in scanInfo.game_exe_list {
+    for scanInfo in gameScanInfo {
+      if scanInfo.gameID == gameID {
+        for exeInfo in scanInfo.gameExeList {
           if exeInfo.md5 == md5 { return exeInfo.version }
         }
       }

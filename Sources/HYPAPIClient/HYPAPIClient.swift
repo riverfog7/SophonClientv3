@@ -40,7 +40,7 @@ public class HYPAPIClient {
 
   private func _getSophonRequestURL(_ route: String, gameSubBranch: GameSubBranch) -> URL {
     return sophonBaseURL.appendingPathComponent(route).appending(queryItems: [
-      URLQueryItem(name: "package_id", value: gameSubBranch.package_id),
+      URLQueryItem(name: "package_id", value: gameSubBranch.packageID),
       URLQueryItem(name: "branch", value: gameSubBranch.branch),
       URLQueryItem(name: "password", value: gameSubBranch.password),
     ])

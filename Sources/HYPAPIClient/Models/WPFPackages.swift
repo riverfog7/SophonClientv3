@@ -7,17 +7,26 @@ public struct WPFPackageInfo: Decodable {
 
 public struct WPFPackage: Decodable {
   public var game: GameType
-  public var wpf_package: WPFPackageInfo
+  public var wpfPackage: WPFPackageInfo
+
+  enum CodingKeys: String, CodingKey {
+    case game
+    case wpfPackage = "wpf_package"
+  }
 }
 
 public struct WPFPackages: Decodable {
-  public var wpf_packages: [WPFPackage]
+  public var wpfPackages: [WPFPackage]
+
+  enum CodingKeys: String, CodingKey {
+    case wpfPackages = "wpf_packages"
+  }
 
   public func findBy(id gameID: String) -> [WPFPackageInfo] {
     var packages: [WPFPackageInfo] = []
-    for package in wpf_packages {
+    for package in wpfPackages {
       if package.game.id == gameID {
-        packages.append(package.wpf_package)
+        packages.append(package.wpfPackage)
       }
     }
     return packages
@@ -25,9 +34,9 @@ public struct WPFPackages: Decodable {
 
   public func findBy(biz gameBiz: String) -> [WPFPackageInfo] {
     var packages: [WPFPackageInfo] = []
-    for package in wpf_packages {
+    for package in wpfPackages {
       if package.game.biz == gameBiz {
-        packages.append(package.wpf_package)
+        packages.append(package.wpfPackage)
       }
     }
     return packages

@@ -9,29 +9,29 @@ func testCNAPI() async throws {
     launcherID: HYPAPI_CN_LAUNCHER_ID)
 
   let gameBranches = try await client.getGameBranches()
-  #expect(gameBranches.game_branches.count > 0)
+  #expect(gameBranches.gameBranches.count > 0)
   #expect(gameBranches.getGameSubBranch(biz: "nap_cn", predownload: false) != nil)
   #expect(gameBranches.getGameSubBranch(biz: "hkrpg_cn", predownload: false) != nil)
   #expect(gameBranches.getGameSubBranch(biz: "hk4e_cn", predownload: false) != nil)
   #expect(gameBranches.getGameSubBranch(biz: "bh3_cn", predownload: false) != nil)
   let gameConfigs = try await client.getGameConfigs()
-  #expect(gameConfigs.launch_configs.count > 0)
+  #expect(gameConfigs.launchConfigs.count > 0)
   #expect(gameConfigs.findBy(biz: "nap_cn") != nil)
   #expect(gameConfigs.findBy(biz: "hkrpg_cn") != nil)
   #expect(gameConfigs.findBy(biz: "hk4e_cn") != nil)
   #expect(gameConfigs.findBy(biz: "bh3_cn") != nil)
   let wpfPackages = try await client.getWPFPackages()
-  #expect(wpfPackages.wpf_packages.count > 0)
+  #expect(wpfPackages.wpfPackages.count > 0)
   #expect(wpfPackages.findBy(biz: "hk4e_cn").count > 0)
   let gameScanInfo = try await client.getGameScanInfo()
-  #expect(gameScanInfo.game_scan_info.count > 0)
+  #expect(gameScanInfo.gameScanInfo.count > 0)
 
-  for branch in gameBranches.game_branches {
+  for branch in gameBranches.gameBranches {
     let _ = try await client.getSophonBuildInfo(branch.main)
     let _ = try await client.getSophonPatchBuildInfo(branch.main)
-    if branch.pre_download != nil {
-      let _ = try await client.getSophonBuildInfo(branch.pre_download!)
-      let _ = try await client.getSophonPatchBuildInfo(branch.pre_download!)
+    if branch.preDownload != nil {
+      let _ = try await client.getSophonBuildInfo(branch.preDownload!)
+      let _ = try await client.getSophonPatchBuildInfo(branch.preDownload!)
     }
   }
 }
@@ -48,22 +48,23 @@ func testOSAPI() async throws {
   #expect(gameBranches.getGameSubBranch(biz: "hk4e_global", predownload: false) != nil)
   #expect(gameBranches.getGameSubBranch(biz: "bh3_global", predownload: false) != nil)
   let gameConfigs = try await client.getGameConfigs()
+  #expect(gameConfigs.launchConfigs.count > 0)
   #expect(gameConfigs.findBy(biz: "nap_global") != nil)
   #expect(gameConfigs.findBy(biz: "hkrpg_global") != nil)
   #expect(gameConfigs.findBy(biz: "hk4e_global") != nil)
   #expect(gameConfigs.findBy(biz: "bh3_global") != nil)
   let wpfPackages = try await client.getWPFPackages()
-  #expect(wpfPackages.wpf_packages.count > 0)
+  #expect(wpfPackages.wpfPackages.count > 0)
   #expect(wpfPackages.findBy(biz: "hk4e_global").count > 0)
   let gameScanInfo = try await client.getGameScanInfo()
-  #expect(gameScanInfo.game_scan_info.count > 0)
+  #expect(gameScanInfo.gameScanInfo.count > 0)
 
-  for branch in gameBranches.game_branches {
+  for branch in gameBranches.gameBranches {
     let _ = try await client.getSophonBuildInfo(branch.main)
     let _ = try await client.getSophonPatchBuildInfo(branch.main)
-    if branch.pre_download != nil {
-      let _ = try await client.getSophonBuildInfo(branch.pre_download!)
-      let _ = try await client.getSophonPatchBuildInfo(branch.pre_download!)
+    if branch.preDownload != nil {
+      let _ = try await client.getSophonBuildInfo(branch.preDownload!)
+      let _ = try await client.getSophonPatchBuildInfo(branch.preDownload!)
     }
   }
 }
