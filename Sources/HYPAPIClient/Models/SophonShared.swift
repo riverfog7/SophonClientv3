@@ -52,7 +52,7 @@ public struct SophonDownloadInfo: Decodable {
     self.urlSuffix = try container.decode(String.self, forKey: .urlSuffix)
   }
 
-  public func buildDownloadURL(target: String) throws -> URL {
+  public func buildDownloadURL(_ target: String) throws -> URL {
     let url = try parseURL(urlPrefix).appendingPathComponent(target)
     let lastComponent = url.lastPathComponent + urlSuffix
     return url.deletingLastPathComponent().appendingPathComponent(lastComponent)

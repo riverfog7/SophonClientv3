@@ -7,4 +7,5 @@ enum APIClientError: Error {
 enum ValidationError: Error {
   case StringConversionError(_ badString: String)
   case InvalidURL(_ invalidURL: String)
+  case InvalidRetCode(_ invalidRetCode: Int)
 }

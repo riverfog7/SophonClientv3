@@ -1,3 +1,9 @@
+import Foundation
+
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
+
 public struct SophonPatchManifestInfo: Decodable {
   public var categoryID: String
   public var categoryName: String
@@ -16,6 +22,10 @@ public struct SophonPatchManifestInfo: Decodable {
     case matchingField = "matching_field"
     case stats
   }
+
+  public func getManifestDownloadURL() throws -> URL {
+    return try manifestDownload.buildDownloadURL(manifest.id)
+  }
 }
 
 public struct SophonPatchBuildInfo: Decodable {
@@ -29,5 +39,14 @@ public struct SophonPatchBuildInfo: Decodable {
     case patchID = "patch_id"
     case tag
     case manifests
+  }
+
+  public func find(_ matchingField: String) -> SophonPatchManifestInfo? {
+    for manifest in manifests {
+      if manifest.matchingField == matchingField {
+        return manifest
+      }
+    }
+    return nil
   }
 }
