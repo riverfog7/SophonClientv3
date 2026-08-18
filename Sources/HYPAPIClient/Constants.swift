@@ -1,5 +1,7 @@
-//let HYPAPI_CN_BASE_URL="https://hyp-api.mihoyo.com/hyp/hyp-connect/api/"
-//let HYPAPI_OS_BASE_URL = "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/"
+let HYPAPI_CN_BASE_URL = "https://hyp-api.mihoyo.com/hyp/hyp-connect/api/"
+let HYPAPI_OS_BASE_URL = "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/"
+let HYPAPI_CN_LAUNCHER_ID = "jGHBHlcOq1"
+let HYPAPI_OS_LAUNCHER_ID = "VYTpXlbWo8"
 
 let GET_GAME_BRANCHES_ROUTE = "getGameBranches"
 let GET_GAME_CONFIGS_ROUTE = "getGameConfigs"
