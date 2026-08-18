@@ -11,7 +11,7 @@ public class HYPAPIClient {
   private let maxRetries: Int
   private let retryInterval: Int
 
-  init(
+  public init(
     baseURL: String, launcherID: String, maxRetries: Int = 10, retryInterval: Int = 5,
     session: URLSession = .shared
   ) throws {

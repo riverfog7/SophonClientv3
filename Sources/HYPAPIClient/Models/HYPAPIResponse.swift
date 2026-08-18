@@ -1,5 +1,5 @@
 struct HYPAPIResponse<DataType: Decodable>: Decodable {
-  var retcode: Int
-  var message: String
-  var data: DataType
+  public var retcode: Int
+  public var message: String
+  public var data: DataType
 }

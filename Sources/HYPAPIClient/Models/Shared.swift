@@ -1,4 +1,4 @@
 public struct GameType: Decodable {
-  var id: String
-  var biz: String
+  public var id: String
+  public var biz: String
 }

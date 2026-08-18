@@ -1,17 +1,17 @@
 public struct WPFPackageInfo: Decodable {
-  var version: String
-  var url: String
-  var md5: String
-  var size: String
+  public var version: String
+  public var url: String
+  public var md5: String
+  public var size: String
 }
 
 public struct WPFPackage: Decodable {
-  var game: GameType
-  var wpf_package: WPFPackageInfo
+  public var game: GameType
+  public var wpf_package: WPFPackageInfo
 }
 
 public struct WPFPackages: Decodable {
-  var wpf_packages: [WPFPackage]
+  public var wpf_packages: [WPFPackage]
 
   public func findBy(id gameID: String) -> [WPFPackageInfo] {
     var packages: [WPFPackageInfo] = []

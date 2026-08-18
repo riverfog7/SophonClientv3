@@ -1,15 +1,15 @@
 public struct GameLaunchConfig: Decodable {
-  var game: GameType
-  var installation_dir: String
-  var exe_file_name: String
-  var audio_pkg_scan_dir: String
-  var wpf_exe_dir: String
-  var wpf_pkg_version_dir: String
-  var enable_ldiff: Bool
+  public var game: GameType
+  public var installation_dir: String
+  public var exe_file_name: String
+  public var audio_pkg_scan_dir: String
+  public var wpf_exe_dir: String
+  public var wpf_pkg_version_dir: String
+  public var enable_ldiff: Bool
 }
 
 public struct GameConfigs: Decodable {
-  var launch_configs: [GameLaunchConfig]
+  public var launch_configs: [GameLaunchConfig]
 
   public func findBy(id gameID: String) -> GameLaunchConfig? {
     for config in launch_configs {

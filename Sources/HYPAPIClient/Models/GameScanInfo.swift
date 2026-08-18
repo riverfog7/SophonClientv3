@@ -1,15 +1,15 @@
 public struct GameExecutableInfo: Decodable {
-  var version: String
-  var md5: String
+  public var version: String
+  public var md5: String
 }
 
 public struct GameScanInfo: Decodable {
-  var game_id: String
-  var game_exe_list: [GameExecutableInfo]
+  public var game_id: String
+  public var game_exe_list: [GameExecutableInfo]
 }
 
 public struct GameScanInfos: Decodable {
-  var game_scan_info: [GameScanInfo]
+  public var game_scan_info: [GameScanInfo]
 
   public func getVersion(id gameID: String, md5: String) -> String? {
     for scanInfo in game_scan_info {
