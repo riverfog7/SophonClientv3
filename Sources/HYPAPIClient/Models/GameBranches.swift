@@ -41,6 +41,18 @@ public struct GameSubBranch: Decodable {
     case diffTags = "diff_tags"
     case categories
   }
+
+  public func getGameBranchCategories(
+    categoryScenario: GameBranchCategoryScenario, categoryType: GameBranchCategoryType
+  ) -> [GameBranchCategory] {
+    var results: [GameBranchCategory] = []
+    for category in categories {
+      if category.type == categoryType && category.scenarios.contains(categoryScenario) {
+        results.append(category)
+      }
+    }
+    return results
+  }
 }
 
 public struct GameBranch: Decodable {
