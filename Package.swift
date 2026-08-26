@@ -15,6 +15,8 @@ let package = Package(
   dependencies: [
     .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.2.0"),
     .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.38.1"),
+    .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
+    .package(url: "https://github.com/facebook/zstd.git", from: "1.5.1"),
   ],
   targets: [
     // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -23,6 +25,8 @@ let package = Package(
       name: "SophonClientv3",
       dependencies: [
         .product(name: "SwiftProtobuf", package: "swift-protobuf"),
+        .product(name: "Crypto", package: "swift-crypto"),
+        .product(name: "libzstd", package: "zstd"),
         "HYPAPIClient",
       ]),
     .target(name: "HYPAPIClient"),
@@ -38,10 +42,10 @@ let package = Package(
       name: "HYPAPIClientTests",
       dependencies: ["HYPAPIClient"]
     ),
-    //        .testTarget(
-    //            name: "SophonClientv3Tests",
-    //            dependencies: ["SophonClientv3"]
-    //        ),
+    .testTarget(
+      name: "SophonClientv3Tests",
+      dependencies: ["SophonClientv3"]
+    ),
   ],
   swiftLanguageModes: [.v6]
 )
