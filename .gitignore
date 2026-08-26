@@ -184,3 +184,5 @@ $RECYCLE.BIN/
 
 .idea
 .DS_Store
+.testData
+
