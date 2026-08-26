@@ -28,9 +28,9 @@ public struct SophonManifestProperty: Decodable {
 }
 
 public struct SophonDownloadInfo: Decodable {
-  public var encryption: Int
+  public var encryption: Bool
   public var password: String
-  public var compression: Int
+  public var compression: Bool
   public var urlPrefix: String
   public var urlSuffix: String
 
@@ -44,9 +44,9 @@ public struct SophonDownloadInfo: Decodable {
 
   public init(from decoder: any Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    self.encryption = try container.decode(Int.self, forKey: .encryption)
+    self.encryption = (try container.decode(Int.self, forKey: .encryption)) == 0 ? false : true
     self.password = try container.decode(String.self, forKey: .password)
-    self.compression = try container.decode(Int.self, forKey: .compression)
+    self.compression = (try container.decode(Int.self, forKey: .compression)) == 0 ? false : true
     self.urlPrefix = try container.decode(String.self, forKey: .urlPrefix)
     let _ = try parseURL(urlPrefix)
     self.urlSuffix = try container.decode(String.self, forKey: .urlSuffix)
