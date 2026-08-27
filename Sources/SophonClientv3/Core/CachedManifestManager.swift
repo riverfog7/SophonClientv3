@@ -2,6 +2,10 @@ import Foundation
 import HYPAPIClient
 import SwiftProtobuf
 
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
+
 class CachedManifestManager {
   private let gameID: String
   private let gameBiz: String
