@@ -35,7 +35,7 @@ func testManifestParse(
     }
 
     for matchingField in (fullResourceCategory + fullAudioCategory).map({ $0.matchingField }) {
-      let manifest = try await client.manifestManager.getSophonManifest(
+      let (manifest, _) = try await client.manifestManager.getSophonManifest(
         matchingField: matchingField)
       #expect(
         manifest.files.count > 0,

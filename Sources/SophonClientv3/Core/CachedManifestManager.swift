@@ -166,14 +166,17 @@ class CachedManifestManager {
   }
 
   internal func getSophonManifest(matchingField: String, predownload: Bool = false) async throws
-    -> Manifest
+    -> (Manifest, SophonDownloadInfo)
   {
+    // returns manifest and sophon chunk download info
     let sophonBuildInfo = try await apiClient.getSophonBuildInfo(
       getGameSubbranch(predownload: predownload))
     guard let sophonManifestInfo = sophonBuildInfo.find(matchingField) else {
       throw SophonClientError.InvalidManifestMatchingFieldError(matchingField)
     }
 
-    return try await _getManifest(manifestInfo: sophonManifestInfo)
+    return (
+      try await _getManifest(manifestInfo: sophonManifestInfo), sophonManifestInfo.chunkDownload
+    )
   }
 }
