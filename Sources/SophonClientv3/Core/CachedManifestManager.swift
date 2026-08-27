@@ -12,6 +12,8 @@ class CachedManifestManager {
   internal let apiClient: HYPAPIClient
   private let manifestCacheDir: URL
   private let session: URLSession
+  private let maxRetries: Int
+  private let retryInterval: Int
 
   private let gameLaunchConfig: GameLaunchConfig
   private let gameBranches: GameBranches
@@ -23,9 +25,11 @@ class CachedManifestManager {
   ) async throws {
     self.session = session
     self.gameBiz = gameBiz
+    self.maxRetries = maxRetries
+    self.retryInterval = retryInterval
     self.apiClient = try HYPAPIClient(
       baseURL: baseURL, sophonBaseURL: sophonBaseURL, launcherID: launcherID,
-      maxRetries: maxRetries, retryInterval: retryInterval)
+      maxRetries: maxRetries, retryInterval: retryInterval, session: session)
     guard let temp = try await apiClient.getGameConfigs().findBy(biz: gameBiz) else {
       throw SophonClientError.CannotFindValidGameError(gameBiz)
     }
@@ -96,7 +100,7 @@ class CachedManifestManager {
     try data.write(to: targetPath)
   }
 
-  private func _getManifest(manifestInfo: SophonManifestInfo) async throws -> Manifest {
+  internal func _getManifest(manifestInfo: SophonManifestInfo) async throws -> Manifest {
     let url = try manifestInfo.getManifestDownloadURL()
     let md5Target = manifestInfo.manifest.checksum
     let isCompressed = manifestInfo.manifestDownload.compression
@@ -109,37 +113,53 @@ class CachedManifestManager {
       var request = URLRequest(url: url)
       request.httpMethod = "GET"
 
-      let (downloadData, response) = try await session.data(for: request)
-
       if isEncrypted || !password.isEmpty {
         throw SophonClientError.UnsupportedManifestConfiguration(
           "Encrypted sophon manifest not supported")
       }
 
-      guard let response = response as? HTTPURLResponse else {
-        throw SophonClientError.InvalidHTTPResponse
-      }
-      guard (200..<300).contains(response.statusCode) else {
-        throw SophonClientError.InvalidHTTPStatus(response.statusCode)
+      var lastError: Error?
+
+      for attempt in 0...maxRetries {
+        do {
+          let (downloadData, response) = try await session.data(for: request)
+
+          guard let response = response as? HTTPURLResponse else {
+            throw SophonClientError.InvalidHTTPResponse
+          }
+          guard (200..<300).contains(response.statusCode) else {
+            throw SophonClientError.InvalidHTTPStatus(response.statusCode)
+          }
+
+          let data: Data
+          if isCompressed {
+            guard Int64(downloadData.count) == compressedSize else {
+              throw SophonClientError.SizeMismatch(
+                expected: compressedSize, actual: Int64(downloadData.count))
+            }
+            data = try decompressZstd(downloadData, uncompressedSize: Int(uncompressedSize))
+          } else {
+            guard Int64(downloadData.count) == uncompressedSize else {
+              throw SophonClientError.SizeMismatch(
+                expected: uncompressedSize, actual: Int64(downloadData.count))
+            }
+            data = downloadData
+          }
+
+          try writeCache(key: md5Target, data: data)
+          return try Manifest(serializedBytes: data)
+        } catch {
+          lastError = error
+
+          if attempt < maxRetries {
+            try await Task.sleep(for: .seconds(retryInterval))
+          }
+        }
       }
 
-      let data: Data
-      if isCompressed {
-        guard Int64(downloadData.count) == compressedSize else {
-          throw SophonClientError.SizeMismatch(
-            expected: compressedSize, actual: Int64(downloadData.count))
-        }
-        data = try decompressZstd(downloadData, uncompressedSize: Int(uncompressedSize))
-      } else {
-        guard Int64(downloadData.count) == uncompressedSize else {
-          throw SophonClientError.SizeMismatch(
-            expected: uncompressedSize, actual: Int64(downloadData.count))
-        }
-        data = downloadData
-      }
-
-      try writeCache(key: md5Target, data: data)
-      return try Manifest(serializedBytes: data)
+      throw lastError
+        ?? SophonClientError.UnknownError(
+          "Downloading manifest failed with an error but there is no error")
     }
 
     return try Manifest(serializedBytes: cachedData)
