@@ -89,9 +89,6 @@ class CachedManifestManager {
 
   internal func writeCache(key: String, data: Data) throws {
     // key should be cache data md5
-    if md5Hex(data) != key {
-      throw SophonClientError.UnknownError("manifest cache key does not match data md5 checksum")
-    }
     let targetPath = self.manifestCacheDir.appendingPathComponent(key)
 
     if FileManager.default.fileExists(atPath: targetPath.path) {
@@ -144,6 +141,11 @@ class CachedManifestManager {
                 expected: uncompressedSize, actual: Int64(downloadData.count))
             }
             data = downloadData
+          }
+
+          let checksum = md5Hex(data)
+          guard checksum == md5Target else {
+            throw SophonClientError.InvalidChecksumError(expected: checksum, actual: md5Target)
           }
 
           try writeCache(key: md5Target, data: data)

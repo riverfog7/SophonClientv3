@@ -10,4 +10,5 @@ enum SophonClientError: Error {
   case UnsupportedManifestConfiguration(_ reason: String)
   case UnknownError(_ reason: String)
   case PredownloadNotAvailableError
+  case InvalidChecksumError(expected: String, actual: String)
 }
