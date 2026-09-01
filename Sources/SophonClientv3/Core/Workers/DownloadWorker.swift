@@ -22,7 +22,7 @@ struct DownloadWorker: Sendable {
 
     guard downloadRequest.size == data.count else {
       throw SophonClientError.SizeMismatch(
-        expected: Int64(downloadRequest.size), actual: Int64(data.count))
+        expected: UInt64(downloadRequest.size), actual: UInt64(data.count))
     }
 
     let checksum = md5Hex(data)

@@ -5,7 +5,7 @@ enum SophonClientError: Error {
   case InvalidManifestMatchingFieldError(_ matchingField: String)
   case InvalidHTTPResponse
   case InvalidHTTPStatus(_ code: Int)
-  case SizeMismatch(expected: Int64, actual: Int64)
+  case SizeMismatch(expected: UInt64, actual: UInt64)
   case ZstdError(_ errString: String)
   case UnsupportedManifestConfiguration(_ reason: String)
   case UnknownError(_ reason: String)

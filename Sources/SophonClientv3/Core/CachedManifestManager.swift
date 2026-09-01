@@ -103,8 +103,8 @@ class CachedManifestManager {
     let isCompressed = manifestInfo.manifestDownload.compression
     let isEncrypted = manifestInfo.manifestDownload.encryption
     let password = manifestInfo.manifestDownload.password
-    let compressedSize = manifestInfo.manifest.compressedSize
-    let uncompressedSize = manifestInfo.manifest.uncompressedSize
+    let compressedSize = UInt64(manifestInfo.manifest.compressedSize)
+    let uncompressedSize = UInt64(manifestInfo.manifest.uncompressedSize)
 
     guard let cachedData = try checkCache(key: md5Target) else {
       var request = URLRequest(url: url)
@@ -130,15 +130,15 @@ class CachedManifestManager {
 
           let data: Data
           if isCompressed {
-            guard Int64(downloadData.count) == compressedSize else {
+            guard UInt64(downloadData.count) == compressedSize else {
               throw SophonClientError.SizeMismatch(
-                expected: compressedSize, actual: Int64(downloadData.count))
+                expected: compressedSize, actual: UInt64(downloadData.count))
             }
             data = try decompressZstd(downloadData, uncompressedSize: Int(uncompressedSize))
           } else {
-            guard Int64(downloadData.count) == uncompressedSize else {
+            guard UInt64(downloadData.count) == uncompressedSize else {
               throw SophonClientError.SizeMismatch(
-                expected: uncompressedSize, actual: Int64(downloadData.count))
+                expected: uncompressedSize, actual: UInt64(downloadData.count))
             }
             data = downloadData
           }

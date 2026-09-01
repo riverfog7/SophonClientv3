@@ -32,7 +32,7 @@ func decompressZstd(
   }
 
   guard written == uncompressedSize else {
-    throw SophonClientError.SizeMismatch(expected: Int64(uncompressedSize), actual: Int64(written))
+    throw SophonClientError.SizeMismatch(expected: UInt64(uncompressedSize), actual: UInt64(written))
   }
 
   return output
