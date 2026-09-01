@@ -24,5 +24,5 @@ message ChunkInfo {
 	uint64 offset = 3;            // Offset at which this chunk should be put into the resulting file
 	uint32 compressed_size = 4;   // Size of the compressed chunk
 	uint32 uncompressed_size = 5; // Size of the uncompressed chunk
-	uint64 xxhash = 6;            // Xxhash checksum of the compressed chunk data
+	string compressed_md5 = 7;	 	// MD5 checksum of compressed chunk
 }
