@@ -6,12 +6,12 @@ import HYPAPIClient
 #endif
 
 struct FileAndSize: Sendable {
-  let fileName: URL
+  let fileURL: URL
   let size: UInt64
 }
 
 struct ChunkApplicationInfo: Sendable {
-  let fileName: URL
+  let fileURL: URL
   let offset: UInt64
 }
 
@@ -73,9 +73,13 @@ final class Installer: Sendable {
     }
   }
 
-  internal func scan(manifests: [Manifest], chunkDownloadInfos: [SophonDownloadInfo]) async throws
+  internal func scan(installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)])
+    async throws
     -> InstallationPlan
   {
+    // TODO: flag duplicate files between manifests
+    let manifests = installInfos.map(\.manifest)
+    let chunkDownloadInfos = installInfos.map(\.chunkDownloadInfo)
     guard manifests.count == chunkDownloadInfos.count else {
       throw SophonClientError.UnknownError(
         "Manifest and downloadInfo counts do not match"
@@ -136,7 +140,7 @@ final class Installer: Sendable {
         if result.state.needsTrimming {
           trimFiles.append(
             FileAndSize(
-              fileName: result.state.filePath,
+              fileURL: result.state.filePath,
               size: result.state.size
             )
           )
@@ -144,7 +148,7 @@ final class Installer: Sendable {
 
         for chunk in result.state.requiredChunks {
           let applicationInfo = ChunkApplicationInfo(
-            fileName: result.state.filePath,
+            fileURL: result.state.filePath,
             offset: chunk.offset
           )
 
