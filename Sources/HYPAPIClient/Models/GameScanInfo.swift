@@ -1,9 +1,9 @@
-public struct GameExecutableInfo: Decodable {
+public struct GameExecutableInfo: Decodable, Sendable {
   public var version: String
   public var md5: String
 }
 
-public struct GameScanInfo: Decodable {
+public struct GameScanInfo: Decodable, Sendable {
   public var gameID: String
   public var gameExeList: [GameExecutableInfo]
 
@@ -13,7 +13,7 @@ public struct GameScanInfo: Decodable {
   }
 }
 
-public struct GameScanInfos: Decodable {
+public struct GameScanInfos: Decodable, Sendable {
   public var gameScanInfo: [GameScanInfo]
 
   enum CodingKeys: String, CodingKey {

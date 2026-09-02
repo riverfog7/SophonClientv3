@@ -4,7 +4,7 @@ import Foundation
   import FoundationNetworking
 #endif
 
-public struct WPFPackageInfo: Decodable {
+public struct WPFPackageInfo: Decodable, Sendable {
   public var version: String
   public var url: URL
   public var md5: String
@@ -26,7 +26,7 @@ public struct WPFPackageInfo: Decodable {
   }
 }
 
-public struct WPFPackage: Decodable {
+public struct WPFPackage: Decodable, Sendable {
   public var game: GameType
   public var wpfPackage: WPFPackageInfo
 
@@ -36,7 +36,7 @@ public struct WPFPackage: Decodable {
   }
 }
 
-public struct WPFPackages: Decodable {
+public struct WPFPackages: Decodable, Sendable {
   public var wpfPackages: [WPFPackage]
 
   enum CodingKeys: String, CodingKey {
