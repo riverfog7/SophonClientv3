@@ -5,7 +5,6 @@ import Foundation
 #endif
 
 struct DownloadRequest: Sendable {
-  let chunkID: String
   let url: URL
   // assume that chunk is always compressed
   // size == compressed_size in protobuf definition
