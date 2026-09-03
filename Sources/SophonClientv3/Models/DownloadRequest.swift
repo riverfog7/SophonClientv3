@@ -9,5 +9,5 @@ struct DownloadRequest: Sendable {
   // assume that chunk is always compressed
   // size == compressed_size in protobuf definition
   let md5: String
-  let size: UInt32
+  let size: UInt64
 }
