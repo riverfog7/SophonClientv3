@@ -11,4 +11,5 @@ enum SophonClientError: Error {
   case UnknownError(_ reason: String)
   case PredownloadNotAvailableError
   case InvalidChecksumError(expected: String, actual: String)
+  case DuplicateFileError(_ fileName: String)
 }

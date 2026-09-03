@@ -77,13 +77,18 @@ final class Installer: Sendable {
     async throws
     -> InstallationPlan
   {
-    // TODO: flag duplicate files between manifests
     let manifests = installInfos.map(\.manifest)
     let chunkDownloadInfos = installInfos.map(\.chunkDownloadInfo)
-    guard manifests.count == chunkDownloadInfos.count else {
-      throw SophonClientError.UnknownError(
-        "Manifest and downloadInfo counts do not match"
-      )
+
+    var fileNameSet = Set<String>()
+    for manifest in manifests {
+      for file in manifest.files {
+        let fileName = file.filename
+        if fileNameSet.contains(fileName) {
+          throw SophonClientError.DuplicateFileError(fileName)
+        }
+        fileNameSet.insert(fileName)
+      }
     }
 
     var manifestIndex = 0
