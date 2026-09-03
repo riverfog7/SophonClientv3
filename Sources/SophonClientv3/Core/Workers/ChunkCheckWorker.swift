@@ -42,11 +42,12 @@ final class ChunkCheckWorker: Sendable {
   }
 
   private func checkOnce(_ fileInfo: borrowing FileInfo) throws -> GameFileState {
+    try checkFileInfo(fileInfo)  // just in case it is used in other stuff
     let filePath = baseGameDir.appendingPathComponent(fileInfo.filename)
     guard let fileSize = UInt64(exactly: fileInfo.size) else {
       throw SophonClientError.UnknownError("Invalid file size: \(fileInfo.size)")
     }
-    if fileInfo.flags == 64 {
+    if fileInfo.flags == FILE_FLAG_DIRECTORY {
       return GameFileState(
         filePath: filePath, needsTrimming: false, size: fileSize, md5: fileInfo.md5,
         requiredChunks: [])

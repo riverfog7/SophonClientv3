@@ -5,3 +5,6 @@ let HYPAPI_OS_LAUNCHER_ID = "VYTpXlbWo8"
 
 let SOPHON_API_CN_BASE_URL = "https://api-takumi.mihoyo.com/downloader/sophon_chunk/api"
 let SOPHON_API_OS_BASE_URL = "https://sg-public-api.hoyoverse.com/downloader/sophon_chunk/api"
+
+let FILE_FLAG_FILE = 0
+let FILE_FLAG_DIRECTORY = 64

@@ -59,41 +59,25 @@ final class Installer: Sendable {
   {
     let manifests = installInfos.map(\.manifest)
     let chunkDownloadInfos = installInfos.map(\.chunkDownloadInfo)
-
-    var fileNameSet = Set<String>()
-    for manifest in manifests {
-      for file in manifest.files where file.flags != 64 {
-        let fileName = file.filename
-        if fileNameSet.contains(fileName) {
-          throw SophonClientError.DuplicateFileError(fileName)
-        }
-        fileNameSet.insert(fileName)
-      }
-    }
+    try checkManifests(manifests)  // this checks fileInfo too
 
     var manifestIndex = 0
     var fileIndex = 0
-    func nextJob() throws -> ScanJob? {
+    func nextJob() -> ScanJob? {
       while manifestIndex < manifests.count {
         let files = manifests[manifestIndex].files
 
         if fileIndex < files.count {
           let file = files[fileIndex]
           fileIndex += 1
-
-          if file.flags == 64 {
-            guard file.md5 == "" && file.size == 0 else {
-              throw SophonClientError.UnknownError(
-                "directory has strange attributes: md5: \(file.md5), size: \(file.size))")
-            }
+          if file.flags == FILE_FLAG_DIRECTORY {
             continue
           }
 
-          let job = ScanJob(
+          return ScanJob(
             file: file,
             downloadInfo: chunkDownloadInfos[manifestIndex]
           )
-          return job
         }
         manifestIndex += 1
         fileIndex = 0
@@ -110,7 +94,7 @@ final class Installer: Sendable {
       var plannedFiles: [PlannedFile] = []
 
       for _ in 0..<maxCocurrentChecks {
-        guard let job = try nextJob() else {
+        guard let job = nextJob() else {
           break
         }
 
@@ -123,7 +107,7 @@ final class Installer: Sendable {
       }
 
       while let result = try await group.next() {
-        if let job = try nextJob() {
+        if let job = nextJob() {
           group.addTask {
             ScanResult(
               state: try await checker.run(job.file),
