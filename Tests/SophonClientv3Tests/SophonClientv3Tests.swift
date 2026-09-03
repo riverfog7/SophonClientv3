@@ -41,6 +41,7 @@ func testManifestParse(
   baseURL: String, sophonBaseURL: String, launcherID: String, gameList: [String]
 ) async throws {
   let cacheDir = getTestDataPath().appendingPathComponent("manifestCache")
+  let installerTempDir = getTestDataPath().appendingPathComponent("installerTemp")
   for gameBiz in gameList {
     let settings = SophonClientSettings(
       baseURL: baseURL, sophonBaseURL: sophonBaseURL,
@@ -61,14 +62,30 @@ func testManifestParse(
         "audio category and resource category must not overlap")
     }
 
+    var installInfos: [(Manifest, SophonDownloadInfo)] = []
     for matchingField in (fullResourceCategory + fullAudioCategory).map({ $0.matchingField }) {
-      let (manifest, _) = try await client.manifestManager.getSophonManifest(
+      let (manifest, chunkDownloadInfo) = try await client.manifestManager.getSophonManifest(
         matchingField: matchingField)
+      installInfos.append((manifest, chunkDownloadInfo))
       #expect(
         manifest.files.count > 0,
         "manifest with matching field \(matchingField) should not have no files")
       testManifestContents(manifest)
+
+      if FileManager.default.fileExists(atPath: installerTempDir.path()) {
+        try FileManager.default.removeItem(at: installerTempDir)
+      }
+      try FileManager.default.createDirectory(
+        at: installerTempDir, withIntermediateDirectories: true)
     }
+    let installer = try Installer(baseGameDir: installerTempDir, maxCocurrentChecks: 8)
+    let installationPlan = try await installer.scan(installInfos: installInfos)
+    print("total chunk count for \(gameBiz): \(installationPlan.totalChunkCount)")
+    print(
+      "download size for \(gameBiz): \(Double(installationPlan.downloadSize) / 1_073_741_824) GiB")
+    print(
+      "disk write size for \(gameBiz): \(Double(installationPlan.diskWriteSize) / 1_073_741_824) GiB"
+    )
   }
 }
 
