@@ -78,7 +78,9 @@ func testManifestParse(
       try FileManager.default.createDirectory(
         at: installerTempDir, withIntermediateDirectories: true)
     }
-    let installer = try Installer(baseGameDir: installerTempDir, maxCocurrentChecks: 8)
+    let installer = try Installer(
+      baseGameDir: installerTempDir, maxCocurrentChecks: 8, maxCocurrentDownloads: 8,
+      maxCocurrentPostProcessors: 8)
     let installationPlan = try await installer.scan(installInfos: installInfos)
     print("total chunk count for \(gameBiz): \(installationPlan.totalChunkCount)")
     print(

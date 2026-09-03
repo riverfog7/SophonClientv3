@@ -29,6 +29,19 @@ struct RequiredChunk: Sendable {
   }
 }
 
+struct DownloadedChunk: Sendable {
+  let md5: String
+  let size: UInt64
+  let data: Data
+  let downloadInfo: SophonDownloadInfo
+  let chunkApplicationInfos: [ChunkApplicationInfo]
+}
+
+struct ProcessedChunk: Sendable {
+  let data: Data
+  let chunkApplicationInfos: [ChunkApplicationInfo]
+}
+
 struct InstallationPlan: Sendable {
   let totalChunkCount: Int
   let downloadSize: UInt64
@@ -49,15 +62,37 @@ private struct ScanResult: Sendable {
 
 final class Installer: Sendable {
   let baseGameDir: URL
-  let maxCocurrentChecks: Int
   let checker: ChunkCheckWorker
+  let downloader: DownloadWorker
+  let postProcessor: ChunkPostProcessWorker
 
-  internal init(baseGameDir: URL, maxCocurrentChecks: Int) throws {
+  let maxCocurrentChecks: Int
+  let maxCocurrentDownloads: Int
+  let maxCocurrentPostProcessors: Int
+
+  internal init(
+    baseGameDir: URL, maxCocurrentChecks: Int, maxCocurrentDownloads: Int,
+    maxCocurrentPostProcessors: Int, session: URLSession = .shared, maxRetries: Int = 10,
+    retryInterval: Int = 5
+  ) throws {
     self.baseGameDir = baseGameDir
     self.checker = ChunkCheckWorker(baseGameDir: self.baseGameDir)
+    self.downloader = DownloadWorker(
+      session: session, maxRetries: maxRetries, retryInterval: retryInterval)
+    self.postProcessor = ChunkPostProcessWorker()
+
     self.maxCocurrentChecks = maxCocurrentChecks
+    self.maxCocurrentDownloads = maxCocurrentDownloads
+    self.maxCocurrentPostProcessors = maxCocurrentPostProcessors
     guard maxCocurrentChecks > 0 else {
       throw SophonClientError.UnknownError("MaxCocurrentChecks should be a positive integer")
+    }
+    guard maxCocurrentDownloads > 0 else {
+      throw SophonClientError.UnknownError("MaxCocurrentDownloads should be a positive integer")
+    }
+    guard maxCocurrentPostProcessors > 0 else {
+      throw SophonClientError.UnknownError(
+        "MaxCocurrentPostProcessors should be a positive integer")
     }
   }
 
@@ -188,5 +223,35 @@ final class Installer: Sendable {
         requiredChunks: requiredChunks,
       )
     }
+  }
+
+  private func download(_ chunk: RequiredChunk) async throws -> DownloadedChunk {
+    guard !chunk.downloadInfo.encryption,
+      chunk.downloadInfo.password.isEmpty
+    else {
+      throw SophonClientError.UnsupportedManifestConfiguration(
+        "Encrypted chunks are not supported"
+      )
+    }
+
+    let downloadURL = try chunk.getDownloadURL()
+    let md5 = chunk.downloadInfo.compression ? chunk.compressedMd5 : chunk.uncompressedMd5
+    let size = chunk.downloadInfo.compression ? chunk.compressedSize : chunk.uncompressedSize
+    let data = try await downloader.run(DownloadRequest(url: downloadURL, md5: md5, size: size))
+
+    return DownloadedChunk(
+      md5: chunk.uncompressedMd5, size: chunk.uncompressedSize, data: data,
+      downloadInfo: chunk.downloadInfo,
+      chunkApplicationInfos: chunk.chunkApplicationInfos)
+  }
+
+  private func postProcess(_ chunk: DownloadedChunk) throws -> ProcessedChunk {
+    if !chunk.downloadInfo.compression {
+      return ProcessedChunk(data: chunk.data, chunkApplicationInfos: chunk.chunkApplicationInfos)
+    }
+
+    let data = try postProcessor.run(
+      ChunkPostProcessRequest(size: chunk.size, md5: chunk.md5, data: chunk.data))
+    return ProcessedChunk(data: data, chunkApplicationInfos: chunk.chunkApplicationInfos)
   }
 }
