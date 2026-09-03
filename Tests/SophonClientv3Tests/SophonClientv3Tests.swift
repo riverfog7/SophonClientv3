@@ -12,18 +12,6 @@ func getTestDataPath() -> URL {
 
 func testManifestContents(_ manifest: Manifest) {
   for fileInfo in manifest.files {
-    #expect([0, 64].contains(fileInfo.flags), "unknown flag (not 0 or 64)")
-    switch fileInfo.flags {
-    case 0:  // is file
-      #expect(fileInfo.size > 0, "file size should be positive int")
-      #expect(fileInfo.md5.count > 0, "md5 should not be empty")
-    case 64:
-      #expect(fileInfo.size == 0, "dir size should be zero")
-      #expect(fileInfo.md5.count == 0, "dir should not have md5")
-    default:
-      #expect(Bool(false), "unknown flag")
-    }
-
     for chunkInfo in fileInfo.chunks {
       #expect(chunkInfo.chunkID.count > 0, "chunk ID should exist")
       #expect(chunkInfo.md5.count > 0, "chunk uncompressed md5 should exist")
@@ -62,7 +50,7 @@ func testManifestParse(
         "audio category and resource category must not overlap")
     }
 
-    var installInfos: [(Manifest, SophonDownloadInfo)] = []
+    var installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)] = []
     for matchingField in (fullResourceCategory + fullAudioCategory).map({ $0.matchingField }) {
       let (manifest, chunkDownloadInfo) = try await client.manifestManager.getSophonManifest(
         matchingField: matchingField)
@@ -78,6 +66,8 @@ func testManifestParse(
       try FileManager.default.createDirectory(
         at: installerTempDir, withIntermediateDirectories: true)
     }
+    try checkManifests(installInfos.map { $0.manifest })
+
     let installer = try Installer(
       baseGameDir: installerTempDir, maxCocurrentChecks: 8, maxCocurrentDownloads: 8,
       maxCocurrentPostProcessors: 8)
