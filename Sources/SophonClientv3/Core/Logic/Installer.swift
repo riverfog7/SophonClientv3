@@ -96,8 +96,8 @@ final class Installer: Sendable {
       of: ScanResult.self
     ) {
       group in
-      var trimFiles: [FileAndSize] = []
       var requiredChunksByID: [String: RequiredChunk] = [:]
+      var plannedFiles: [PlannedFile] = []
 
       for _ in 0..<maxCocurrentChecks {
         guard let job = nextJob() else {
@@ -122,18 +122,15 @@ final class Installer: Sendable {
           }
         }
 
-        if result.state.needsTrimming {
-          trimFiles.append(
-            FileAndSize(
-              fileURL: result.state.filePath,
-              size: result.state.size
-            )
-          )
-        }
+        let state = result.state
+        plannedFiles.append(
+          PlannedFile(
+            fileURL: state.filePath, size: state.size, md5: state.md5,
+            requiredChunkCount: state.requiredChunks.count, needsTrimming: state.needsTrimming))
 
-        for chunk in result.state.requiredChunks {
+        for chunk in state.requiredChunks {
           let applicationInfo = ChunkApplicationInfo(
-            fileURL: result.state.filePath,
+            fileURL: state.filePath,
             offset: chunk.offset
           )
 
@@ -164,8 +161,8 @@ final class Installer: Sendable {
         totalChunkCount: requiredChunks.count,
         downloadSize: downloadSize,
         diskWriteSize: diskWriteSize,
-        trimFiles: trimFiles,
         requiredChunks: requiredChunks,
+        plannedFiles: plannedFiles,
       )
     }
   }

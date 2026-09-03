@@ -5,11 +5,6 @@ import HYPAPIClient
   import FoundationNetworking
 #endif
 
-struct FileAndSize: Sendable {
-  let fileURL: URL
-  let size: UInt64
-}
-
 struct ChunkApplicationInfo: Sendable {
   let fileURL: URL
   let offset: UInt64
@@ -46,16 +41,27 @@ struct InstallationPlan: Sendable {
   let totalChunkCount: Int
   let downloadSize: UInt64
   let diskWriteSize: UInt64
-  let trimFiles: [FileAndSize]
   let requiredChunks: [RequiredChunk]
+  let plannedFiles: [PlannedFile]
+  var trimFiles: LazyFilterSequence<[PlannedFile]> {
+    plannedFiles.lazy.filter { $0.needsTrimming }
+  }
 }
 
-private struct ScanJob: Sendable {
+struct PlannedFile: Sendable {
+  let fileURL: URL
+  let size: UInt64
+  let md5: String
+  let requiredChunkCount: Int
+  let needsTrimming: Bool
+}
+
+struct ScanJob: Sendable {
   let file: FileInfo
   let downloadInfo: SophonDownloadInfo
 }
 
-private struct ScanResult: Sendable {
+struct ScanResult: Sendable {
   let state: GameFileState
   let downloadInfo: SophonDownloadInfo
 }

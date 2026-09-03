@@ -10,5 +10,6 @@ struct GameFileState: Sendable {
   // just by checking chunk hashes
   let needsTrimming: Bool
   let size: UInt64
+  let md5: String  // for PlannedFile conversion
   let requiredChunks: [ChunkInfo]
 }

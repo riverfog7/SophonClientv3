@@ -48,7 +48,8 @@ final class ChunkCheckWorker: Sendable {
     }
     if fileInfo.flags == 64 {
       return GameFileState(
-        filePath: filePath, needsTrimming: false, size: fileSize, requiredChunks: [])
+        filePath: filePath, needsTrimming: false, size: fileSize, md5: fileInfo.md5,
+        requiredChunks: [])
     }
 
     let chunks = fileInfo.chunks.sorted { $0.offset < $1.offset }
@@ -57,7 +58,7 @@ final class ChunkCheckWorker: Sendable {
       handle = try FileHandle(forReadingFrom: filePath)
     } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
       return GameFileState(
-        filePath: filePath, needsTrimming: false, size: fileSize,
+        filePath: filePath, needsTrimming: false, size: fileSize, md5: fileInfo.md5,
         requiredChunks: fileInfo.chunks)
     } catch {
       throw error
@@ -74,7 +75,7 @@ final class ChunkCheckWorker: Sendable {
     }
 
     return GameFileState(
-      filePath: filePath, needsTrimming: needsTrimming, size: fileSize,
+      filePath: filePath, needsTrimming: needsTrimming, size: fileSize, md5: fileInfo.md5,
       requiredChunks: requiredChunks)
   }
 }
