@@ -62,7 +62,7 @@ final class Installer: Sendable {
 
     var fileNameSet = Set<String>()
     for manifest in manifests {
-      for file in manifest.files {
+      for file in manifest.files where file.flags != 64 {
         let fileName = file.filename
         if fileNameSet.contains(fileName) {
           throw SophonClientError.DuplicateFileError(fileName)
@@ -73,16 +73,26 @@ final class Installer: Sendable {
 
     var manifestIndex = 0
     var fileIndex = 0
-    func nextJob() -> ScanJob? {
+    func nextJob() throws -> ScanJob? {
       while manifestIndex < manifests.count {
         let files = manifests[manifestIndex].files
 
         if fileIndex < files.count {
+          let file = files[fileIndex]
+          fileIndex += 1
+
+          if file.flags == 64 {
+            guard file.md5 == "" && file.size == 0 else {
+              throw SophonClientError.UnknownError(
+                "directory has strange attributes: md5: \(file.md5), size: \(file.size))")
+            }
+            continue
+          }
+
           let job = ScanJob(
-            file: files[fileIndex],
+            file: file,
             downloadInfo: chunkDownloadInfos[manifestIndex]
           )
-          fileIndex += 1
           return job
         }
         manifestIndex += 1
@@ -100,7 +110,7 @@ final class Installer: Sendable {
       var plannedFiles: [PlannedFile] = []
 
       for _ in 0..<maxCocurrentChecks {
-        guard let job = nextJob() else {
+        guard let job = try nextJob() else {
           break
         }
 
@@ -113,7 +123,7 @@ final class Installer: Sendable {
       }
 
       while let result = try await group.next() {
-        if let job = nextJob() {
+        if let job = try nextJob() {
           group.addTask {
             ScanResult(
               state: try await checker.run(job.file),
