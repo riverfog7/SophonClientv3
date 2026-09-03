@@ -163,7 +163,9 @@ final class Installer: Sendable {
       }
 
       let requiredChunks = Array(requiredChunksByID.values)
-      let downloadSize = requiredChunks.reduce(0) { $0 + $1.compressedSize }
+      let downloadSize = requiredChunks.reduce(0) {
+        $0 + ($1.downloadInfo.compression ? $1.compressedSize : $1.uncompressedSize)
+      }
       let diskWriteSize = requiredChunks.reduce(UInt64(0)) {
         $0 + $1.uncompressedSize * UInt64($1.chunkApplicationInfos.count)
       }
