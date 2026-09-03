@@ -17,6 +17,7 @@ let package = Package(
     .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.38.1"),
     .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     .package(url: "https://github.com/facebook/zstd.git", from: "1.5.1"),
+    .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
   ],
   targets: [
     // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -27,6 +28,7 @@ let package = Package(
         .product(name: "SwiftProtobuf", package: "swift-protobuf"),
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "libzstd", package: "zstd"),
+        .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
         "HYPAPIClient",
       ]),
     .target(name: "HYPAPIClient"),
