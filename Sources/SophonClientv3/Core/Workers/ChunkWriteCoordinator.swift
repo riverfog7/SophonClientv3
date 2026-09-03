@@ -1,3 +1,4 @@
+import AsyncAlgorithms
 import Foundation
 
 final class ChunkWriteCoordinator: Sendable {
@@ -61,5 +62,34 @@ final class ChunkWriteCoordinator: Sendable {
     let index = Int(hash % UInt(workers.count))
 
     return workers[index]
+  }
+
+  internal func run(
+    _ input: AsyncChannel<ProcessedChunk>
+  ) async throws {
+    do {
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        for _ in workers.indices {
+          group.addTask { [self] in
+            for await chunk in input {
+              try Task.checkCancellation()
+              try await write(chunk)
+            }
+          }
+        }
+
+        do {
+          while (try await group.next()) != nil {}
+        } catch {
+          group.cancelAll()
+          throw error
+        }
+      }
+    } catch {
+      await closeAll()
+      throw error
+    }
+
+    await closeAll()
   }
 }
