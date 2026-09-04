@@ -1,4 +1,4 @@
-struct HYPAPIResponse<DataType: Decodable & Sendable>: Decodable, Sendable {
+struct HYPAPIResponse<DataType: Codable & Sendable>: Codable, Sendable {
   public var retcode: Int
   public var message: String
   public var data: DataType

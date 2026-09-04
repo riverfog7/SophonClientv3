@@ -40,7 +40,7 @@ public final class HYPAPIClient: Sendable {
     ])
   }
 
-  private func _makeAPIRequest<ResponseType: Decodable & Sendable>(
+  private func _makeAPIRequest<ResponseType: Codable & Sendable>(
     _ endpointURL: URL, method: String = "GET"
   ) async throws -> ResponseType {
     var request = URLRequest(url: endpointURL)

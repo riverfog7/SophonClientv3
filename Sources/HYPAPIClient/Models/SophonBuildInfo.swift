@@ -4,7 +4,7 @@ import Foundation
   import FoundationNetworking
 #endif
 
-public struct SophonManifestInfo: Decodable, Sendable {
+public struct SophonManifestInfo: Codable, Sendable {
   public var categoryID: String
   public var categoryName: String
   public var manifest: SophonManifestProperty
@@ -30,7 +30,7 @@ public struct SophonManifestInfo: Decodable, Sendable {
   }
 }
 
-public struct SophonBuildInfo: Decodable, Sendable {
+public struct SophonBuildInfo: Codable, Sendable {
   public var buildID: String
   public var tag: String
   public var manifests: [SophonManifestInfo]

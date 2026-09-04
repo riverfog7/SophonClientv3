@@ -4,7 +4,7 @@ import Foundation
   import FoundationNetworking
 #endif
 
-public struct SophonManifestProperty: Decodable, Sendable {
+public struct SophonManifestProperty: Codable, Sendable {
   public var id: String
   public var checksum: String
   public var compressedSize: Int64
@@ -27,7 +27,7 @@ public struct SophonManifestProperty: Decodable, Sendable {
   }
 }
 
-public struct SophonDownloadInfo: Decodable, Sendable {
+public struct SophonDownloadInfo: Codable, Sendable {
   public var encryption: Bool
   public var password: String
   public var compression: Bool
@@ -59,7 +59,7 @@ public struct SophonDownloadInfo: Decodable, Sendable {
   }
 }
 
-public struct SophonManifestStats: Decodable, Sendable {
+public struct SophonManifestStats: Codable, Sendable {
   public var compressedSize: Int64
   public var uncompressedSize: Int64
   public var fileCount: Int

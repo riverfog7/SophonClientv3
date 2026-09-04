@@ -1,4 +1,4 @@
-public struct GameLaunchConfig: Decodable, Sendable {
+public struct GameLaunchConfig: Codable, Sendable {
   public var game: GameType
   public var installationDir: String
   public var exeFileName: String
@@ -18,7 +18,7 @@ public struct GameLaunchConfig: Decodable, Sendable {
   }
 }
 
-public struct GameConfigs: Decodable, Sendable {
+public struct GameConfigs: Codable, Sendable {
   public var launchConfigs: [GameLaunchConfig]
 
   enum CodingKeys: String, CodingKey {

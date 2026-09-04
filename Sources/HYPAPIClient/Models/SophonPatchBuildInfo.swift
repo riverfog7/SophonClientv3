@@ -4,7 +4,7 @@ import Foundation
   import FoundationNetworking
 #endif
 
-public struct SophonPatchManifestInfo: Decodable, Sendable {
+public struct SophonPatchManifestInfo: Codable, Sendable {
   public var categoryID: String
   public var categoryName: String
   public var manifest: SophonManifestProperty
@@ -28,7 +28,7 @@ public struct SophonPatchManifestInfo: Decodable, Sendable {
   }
 }
 
-public struct SophonPatchBuildInfo: Decodable, Sendable {
+public struct SophonPatchBuildInfo: Codable, Sendable {
   public var buildID: String
   public var patchID: String
   public var tag: String

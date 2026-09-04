@@ -1,16 +1,16 @@
-public enum GameBranchCategoryScenario: String, Decodable, Sendable {
+public enum GameBranchCategoryScenario: String, Codable, Sendable {
   // full install or base install
   case full = "CATEGORY_SCENARIO_FULL"
   case base = "CATEGORY_SCENARIO_BASE"
 }
 
-public enum GameBranchCategoryType: String, Decodable, Sendable {
+public enum GameBranchCategoryType: String, Codable, Sendable {
   // game resource or audio package
   case resource = "CATEGORY_TYPE_RESOURCE"
   case audio = "CATEGORY_TYPE_AUDIO"
 }
 
-public struct GameBranchCategory: Decodable, Sendable {
+public struct GameBranchCategory: Codable, Sendable {
   public var categoryID: String
   public var matchingField: String
   public var type: GameBranchCategoryType
@@ -24,7 +24,7 @@ public struct GameBranchCategory: Decodable, Sendable {
   }
 }
 
-public struct GameSubBranch: Decodable, Sendable {
+public struct GameSubBranch: Codable, Sendable {
   // Represents a single branch, either predownload or main
   public var packageID: String
   public var branch: String
@@ -55,7 +55,7 @@ public struct GameSubBranch: Decodable, Sendable {
   }
 }
 
-public struct GameBranch: Decodable, Sendable {
+public struct GameBranch: Codable, Sendable {
   public var game: GameType
   public var main: GameSubBranch
   public var preDownload: GameSubBranch?
@@ -69,7 +69,7 @@ public struct GameBranch: Decodable, Sendable {
   }
 }
 
-public struct GameBranches: Decodable, Sendable {
+public struct GameBranches: Codable, Sendable {
   public var gameBranches: [GameBranch]
 
   enum CodingKeys: String, CodingKey {
