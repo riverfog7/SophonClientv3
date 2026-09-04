@@ -57,12 +57,18 @@ final class ChunkCheckWorker: Sendable {
     let handle: FileHandle
     do {
       handle = try FileHandle(forReadingFrom: filePath)
-    } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+    } catch {
+      let nsError = error as NSError
+      let isMissingFIle =
+        nsError.domain == NSCocoaErrorDomain
+        && (nsError.code == CocoaError.Code.fileNoSuchFile.rawValue
+          || nsError.code == CocoaError.Code.fileReadNoSuchFile.rawValue)
+      guard isMissingFIle else {
+        throw error
+      }
       return GameFileState(
         filePath: filePath, needsTrimming: false, size: fileSize, md5: fileInfo.md5,
         requiredChunks: fileInfo.chunks)
-    } catch {
-      throw error
     }
 
     defer { try? handle.close() }
