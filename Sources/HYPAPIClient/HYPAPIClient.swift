@@ -4,7 +4,7 @@ import Foundation
   import FoundationNetworking
 #endif
 
-public class HYPAPIClient {
+public final class HYPAPIClient: Sendable {
   private let baseURL: URL
   private let sophonBaseURL: URL
   private let launcherID: String
