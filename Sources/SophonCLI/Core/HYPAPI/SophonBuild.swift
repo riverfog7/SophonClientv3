@@ -61,6 +61,7 @@ struct SophonBuildCLI: AsyncParsableCommand {
   var outputFormat: String = "yaml"
 
   mutating func run() async throws {
+    // TODO: refactor this so that multiple commands share base class
     let client = HYPAPIClientManager.shared.getClient(isCN: isCN)
     let gameBranches = try await client.getGameBranches()
 
