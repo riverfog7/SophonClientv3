@@ -66,7 +66,10 @@ struct SophonBuildCLI: AsyncParsableCommand {
     }
 
     let encoder = JSONEncoder()
-    encoder.outputFormatting = prettyPrint ? [.prettyPrinted, .sortedKeys] : [.sortedKeys]
+    let defaultFormatting: JSONEncoder.OutputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    encoder.outputFormatting = defaultFormatting.union(
+      prettyPrint ? [.prettyPrinted] : []
+    )
 
     var jsonData: Data
     if isPatch {
