@@ -30,7 +30,11 @@ let package = Package(
         .product(name: "libzstd", package: "zstd"),
         .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
         "HYPAPIClient",
-      ]),
+      ],
+      plugins: [
+        .plugin(name: "SwiftProtobufPlugin", package: "swift-protobuf")
+      ],
+    ),
     .target(name: "HYPAPIClient"),
     .executableTarget(
       name: "SophonCLI",
