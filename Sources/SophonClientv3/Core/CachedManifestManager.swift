@@ -8,7 +8,6 @@ import SwiftProtobuf
 
 class CachedManifestManager {
   private let gameID: String
-  private let gameBiz: String
   internal let apiClient: HYPAPIClient
   private let manifestCacheDir: URL
   private let session: URLSession
@@ -34,7 +33,6 @@ class CachedManifestManager {
       throw SophonClientError.CannotFindValidGameError(gameID)
     }
     gameLaunchConfig = temp
-    gameBiz = temp.game.biz
     gameBranches = try await apiClient.getGameBranches()
 
     self.manifestCacheDir = URL(filePath: manifestCacheDir)
@@ -56,7 +54,7 @@ class CachedManifestManager {
     return gameLaunchConfig
   }
 
-  internal func getGameSubbranch(predownload: Bool = false) async throws -> GameSubBranch {
+  internal func getGameSubbranch(predownload: Bool = false) throws -> GameSubBranch {
     guard let subBranch = gameBranches.getGameSubBranch(id: gameID, predownload: predownload) else {
       if predownload {
         throw SophonClientError.PredownloadNotAvailableError
