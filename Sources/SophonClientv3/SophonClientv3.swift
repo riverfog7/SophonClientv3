@@ -1,6 +1,7 @@
 import Foundation
 import HYPAPIClient
 import Logging
+import Puppy
 
 #if canImport(FoundationNetworking)
   import FoundationNetworking
@@ -15,19 +16,30 @@ public class SophonClientv3 {
 
   public init(
     _ settings: SophonClientSettings,
-    baseGameDir: URL,
-    logger: Logger? = nil,
+    baseGameDir: URL
   )
     async throws
   {
     self.gameID = settings.gameID
-    // create no-op logger if logger is not provided
-    self.logger =
-      logger
-      ?? Logger(
-        label: "SophonClientv3",
-        factory: { _ in SwiftLogNoOpLogHandler() }
-      )
+    var puppy = Puppy()
+    if settings.logStdout {
+      puppy.add(ConsoleLogger("SophonClientv3.stdout"))
+    }
+    if let path = settings.logFile {
+      puppy.add(
+        try FileLogger(
+          "SophonClientv3.file",
+          fileURL: URL(fileURLWithPath: path).absoluteURL,
+          writeMode: .print))
+    }
+    self.logger = Logger(label: "SophonClientv3") { [puppy] label in
+      guard !puppy.loggers.isEmpty else {
+        return SwiftLogNoOpLogHandler()
+      }
+      var handler = PuppyLogHandler(label: label, puppy: puppy)
+      handler.logLevel = .info
+      return handler
+    }
     self.manifestManager = try await CachedManifestManager(
       baseURL: settings.baseURL, sophonBaseURL: settings.sophonBaseURL,
       launcherID: settings.launcherID, gameID: settings.gameID,
