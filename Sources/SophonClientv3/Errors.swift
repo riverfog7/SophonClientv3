@@ -14,6 +14,7 @@ enum SophonClientError: Error {
   case PredownloadNotAvailableError
   case InvalidChecksumError(expected: String, actual: String)
   case DuplicateFileError(_ fileName: String)
+  case UnknownVoicePackError(_ matchingField: String)
 }
 
 extension SophonClientError: LocalizedError {
@@ -45,6 +46,8 @@ extension SophonClientError: LocalizedError {
       return "Checksum mismatch: expected '\(expected)', got '\(actual)'."
     case .DuplicateFileError(let fileName):
       return "Duplicate file: \(fileName)"
+    case .UnknownVoicePackError(let matchingField):
+      return "Unknown voice pack: \(matchingField)"
     }
   }
 }

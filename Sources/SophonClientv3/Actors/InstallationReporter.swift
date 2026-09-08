@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-actor InstallationReporter: OperationReporting {
+public actor InstallationReporter: OperationReporting {
   private let logger: Logger
   private var progress = InstallationProgress()
 
@@ -44,7 +44,7 @@ actor InstallationReporter: OperationReporting {
     subscribers.removeValue(forKey: id)?.finish()
   }
 
-  func record(_ event: InstallationEvent) {
+  public func record(_ event: InstallationEvent) {
     guard progress.outcome == nil else {
       return
     }

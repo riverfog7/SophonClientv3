@@ -36,8 +36,8 @@ func testManifestParse(
       baseURL: baseURL, sophonBaseURL: sophonBaseURL,
       launcherID: launcherID, gameID: gameID,
       manifestCacheDir: cacheDir.path())
-    let client = try await SophonClientv3(settings)
-    let subBranch = try await client.manifestManager.getGameSubbranch(predownload: false)
+    let client = try await SophonClientv3(settings, baseGameDir: installerTempDir)
+    let subBranch = try client.manifestManager.getGameSubbranch(predownload: false)
 
     let fullResourceCategory = subBranch.getGameBranchCategories(
       categoryScenario: GameBranchCategoryScenario.full,

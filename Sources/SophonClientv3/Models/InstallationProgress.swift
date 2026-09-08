@@ -4,20 +4,20 @@ import Foundation
   import FoundationNetworking
 #endif
 
-enum InstallationPhase: String, Sendable {
+public enum InstallationPhase: String, Sendable {
   case metadata
   case scanning
   case trimming
   case running
 }
 
-enum InstallationOutcome: Sendable {
+public enum InstallationOutcome: Sendable {
   case completed
   case failed(reason: String)
   case cancelled
 }
 
-enum InstallationEvent: Sendable {
+public enum InstallationEvent: Sendable {
   // metadata stage
   case metadataPulled
 
@@ -40,7 +40,7 @@ enum InstallationEvent: Sendable {
   case finished(InstallationOutcome)
 }
 
-struct InstallationProgress: Sendable {
+public struct InstallationProgress: Sendable {
   var phase: InstallationPhase = .metadata
   var totalDownloadBytes: UInt64?
   var totalWriteBytes: UInt64?
