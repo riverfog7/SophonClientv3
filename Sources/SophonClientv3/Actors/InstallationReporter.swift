@@ -50,8 +50,15 @@ public actor InstallationReporter: OperationReporting {
     }
 
     switch event {
-    case .metadataPulled:
-      logger.info("Installation metadata loaded")
+    case .manifestPulled(let matchingField, let predownload):
+      logger.info(
+        "Sophon manifest downloaded",
+        metadata: [
+          "matchingField": "\(matchingField)",
+          "predownload": "\(predownload)",
+        ]
+
+      )
 
     case .fileMissing(let filePath):
       logger.debug(

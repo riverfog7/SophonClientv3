@@ -180,7 +180,7 @@ class CachedManifestManager {
     }
 
     let manifest = try await _getManifest(manifestInfo: sophonManifestInfo)
-    await reporter?.record(.metadataPulled)
+    await reporter?.record(.manifestPulled(matchingField: matchingField, predownload: predownload))
     return (manifest, sophonManifestInfo.chunkDownload)
   }
 }

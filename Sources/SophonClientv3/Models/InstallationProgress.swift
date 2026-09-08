@@ -19,7 +19,7 @@ public enum InstallationOutcome: Sendable {
 
 public enum InstallationEvent: Sendable {
   // metadata stage
-  case metadataPulled
+  case manifestPulled(matchingField: String, predownload: Bool)
 
   // scanning stage
   case fileMissing(filePath: URL)
