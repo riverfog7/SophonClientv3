@@ -496,64 +496,115 @@ private actor InstallDashboard {
   }
 
   private func lines(at time: Double) -> [String] {
+    let status: String
+    switch outcome {
+    case .completed?: status = "COMPLETED"
+    case .cancelled?: status = "CANCELLED"
+    case .failed?: status = "FAILED"
+    case nil: status = cancelling ? "CANCELLING..." : installPhaseName(phase).uppercased()
+    }
     var lines = [
-      "Install \(installText(title))",
-      "Destination: \(installText(directory))",
-      "Stage: \(cancelling && outcome == nil ? "Cancelling..." : installPhaseName(phase))  Elapsed \(installDuration(time - phaseStart))  Total \(installDuration(time))  ETA \(installDuration(stageETA(at: time)))",
+      "  SOPHON / INSTALL",
+      "  \(installText(title, limit: 70))",
+      "  Target  \(installText(directory, limit: 65))",
+      "",
+      "  \(status)",
+      "  Stage \(installDuration(time - phaseStart))   Total \(installDuration(time))   ETA \(installDuration(stageETA(at: time)))",
+      "",
     ]
     switch phase {
     case .metadata:
       lines += [
-        "Manifests: \(manifests.value) / \(manifests.total.map(String.init) ?? "—")",
-        "Cache: \(installText(cache))",
+        progressRow("Manifests", manifests, at: time),
+        "  Loaded  \(manifests.value) / \(manifests.total.map(String.init) ?? "—") manifests",
+        "  Cache   \(installText(cache, limit: 65))",
       ]
     case .scanning:
       lines += [
-        "Assessed: \(installPercent(scan.value, scan.total))  \(installBytes(Double(scan.value))) / \(scan.total.map { installBytes(Double($0)) } ?? "—")",
-        "Read: \(installBytes(Double(reads.value)))  Speed: \(installSpeed(reads.rate(at: time)))",
-        "Chunks: \(scanChunks) / \(totalScanChunks.map(String.init) ?? "—")  Files: \(scannedFiles) / \(totalFiles.map(String.init) ?? "—")",
-        "Missing files: \(missingFiles)  Files needing repair: \(brokenFiles)",
+        progressRow("Verify", scan, at: time),
+        "  Assessed  \(installBytes(Double(scan.value))) / \(scan.total.map { installBytes(Double($0)) } ?? "—")",
+        "",
+        "  Chunks  \(scanChunks) / \(totalScanChunks.map(String.init) ?? "—")   Files  \(scannedFiles) / \(totalFiles.map(String.init) ?? "—")",
+        "  Missing \(missingFiles)   Needing repair \(brokenFiles)",
       ]
     case .trimming:
-      lines += ["Trimmed files: \(trims.value) / \(trimFiles)"]
+      lines += [
+        progressRow("Trim", trims, at: time), "  Trimmed  \(trims.value) / \(trimFiles) files",
+      ]
     case .running:
       lines += byteRow("Download", downloads, at: time)
       lines += [
-        "Process: \(installPercent(processing.value, processing.total))  \(processing.value) / \(processing.total.map(String.init) ?? "—") chunks  (\(installBytes(Double(processedBytes))))",
-        "  Elapsed \(installDuration(processing.elapsed(at: time)))  ETA \(installDuration(processing.eta(at: time)))",
+        "",
+        progressRow("Process", processing, at: time),
+        "  \(installColumn("\(processing.value) / \(processing.total.map(String.init) ?? "—") chunks"))\(installBytes(Double(processedBytes)))",
+        "  Elapsed \(installDuration(processing.elapsed(at: time)))   ETA \(installDuration(processing.eta(at: time)))",
+        "",
       ]
       lines += byteRow("Write", writes, at: time)
-      lines += [
-        "Files: \(completedFiles) / \(totalFiles.map(String.init) ?? "—")  Downloaded chunks: \(downloadedChunks)  Retries: \(retries)"
-      ]
+    }
+    // Keep verification reads visible after the pipeline moves on to downloads and writes.
+    lines += [
+      "",
+      "  Read  \(installColumn(installBytes(Double(reads.value)), width: 20))\(installSpeed(reads.rate(at: time)))\(reads.ended != nil ? "  (last rate)" : "")",
+    ]
+    if phase == .running {
+      lines.append(
+        "  Files \(completedFiles) / \(totalFiles.map(String.init) ?? "—")   Downloaded chunks \(downloadedChunks)   Retries \(retries)"
+      )
     }
     if let outcome {
-      switch outcome {
-      case .completed: lines.append("COMPLETED")
-      case .cancelled: lines.append("CANCELLED")
-      case .failed(let reason): lines.append("FAILED: \(installText(reason, limit: 500))")
+      if case .failed(let reason) = outcome {
+        lines.append("  Error  \(installText(reason, limit: 500))")
       }
       lines.append(
-        "Assessed \(installBytes(Double(scan.value))) (\(scanChunks) chunks); read \(installBytes(Double(reads.value))); downloaded \(installBytes(Double(downloads.value))); written \(installBytes(Double(writes.value)))"
+        "  Assessed \(installBytes(Double(scan.value))) (\(scanChunks) chunks)   Downloaded \(installBytes(Double(downloads.value)))   Written \(installBytes(Double(writes.value)))"
       )
       lines.append(
-        "Stage durations: "
+        "  "
           + [InstallationPhase.metadata, .scanning, .trimming, .running].compactMap { phase in
-            durations[phase].map { "\(installPhaseName(phase)) \(installDuration($0))" }
+            durations[phase].map {
+              "\(phase == .scanning ? "Verify" : installPhaseName(phase)) \(installDuration($0))"
+            }
           }.joined(separator: " | "))
     } else {
-      lines.append("Latest: \(installText(latest))")
-      if let notice = notices.last { lines.append(notice) }
+      lines.append("  Latest  \(installText(latest, limit: 65))")
+      if let notice = notices.last { lines.append("  \(installText(notice, limit: 72))") }
     }
     return lines
   }
 
   private func byteRow(_ label: String, _ meter: InstallMeter, at time: Double) -> [String] {
     [
-      "\(label): \(installPercent(meter.value, meter.total))  \(installBytes(Double(meter.value))) / \(meter.total.map { installBytes(Double($0)) } ?? "—")",
-      "  \(installSpeed(meter.rate(at: time)))  Elapsed \(installDuration(meter.elapsed(at: time)))  ETA \(installDuration(meter.eta(at: time)))",
+      progressRow(label, meter, at: time),
+      "  \(installColumn("\(installBytes(Double(meter.value))) / \(meter.total.map { installBytes(Double($0)) } ?? "—")"))\(installSpeed(meter.rate(at: time)))",
+      "  Elapsed \(installDuration(meter.elapsed(at: time)))   ETA \(installDuration(meter.eta(at: time)))",
     ]
   }
+
+  private func progressRow(_ label: String, _ meter: InstallMeter, at time: Double) -> String {
+    "  \(installColumn(label, width: 12))\(installBar(meter.value, meter.total, at: time, unicode: !plain))  \(installPercent(meter.value, meter.total))"
+  }
+}
+
+private func installColumn(_ text: String, width: Int = 38) -> String {
+  text + String(repeating: " ", count: max(2, width - text.count))
+}
+
+private func installBar(_ value: UInt64, _ total: UInt64?, at time: Double, unicode: Bool) -> String
+{
+  let width = 28
+  let fill = unicode ? "█" : "="
+  let empty = unicode ? "░" : "-"
+  if let total {
+    let fraction = total == 0 ? 1 : min(1, Double(value) / Double(total))
+    let filled = Int(fraction * Double(width))
+    return "[" + String(repeating: fill, count: filled)
+      + String(repeating: empty, count: width - filled) + "]"
+  }
+  let step = Int(time.truncatingRemainder(dividingBy: 12) * 4) % 48
+  let position = step <= 24 ? step : 48 - step
+  return "[" + String(repeating: empty, count: position) + String(repeating: fill, count: 4)
+    + String(repeating: empty, count: width - position - 4) + "]"
 }
 
 private func installPhaseName(_ phase: InstallationPhase) -> String {
@@ -608,6 +659,7 @@ private func installText(_ value: String, limit: Int = 140) -> String {
 // Mutable terminal state and potentially blocking writes are confined to this serial queue.
 private final class InstallTerminal: @unchecked Sendable {
   let interactive: Bool
+  private let colors: Bool
   private let queue = DispatchQueue(label: "sophon.cli.output")
   private var previousLines = 0
   private var previousWidth = 0
@@ -622,6 +674,7 @@ private final class InstallTerminal: @unchecked Sendable {
         !plain && isatty(STDERR_FILENO) == 1
         && ProcessInfo.processInfo.environment["TERM"] != "dumb"
     #endif
+    colors = interactive && ProcessInfo.processInfo.environment["NO_COLOR"] == nil
   }
 
   func write(_ frame: InstallFrame) async throws {
@@ -638,13 +691,13 @@ private final class InstallTerminal: @unchecked Sendable {
                 if size.ws_row > 0 { height = Int(size.ws_row) }
               }
             #endif
-            // UTF-8 length conservatively bounds display width without a Unicode-width dependency.
+            // Our bar glyphs are one cell; conservatively budget other Unicode by UTF-8 length.
             let lines = frame.lines.flatMap { line -> [String] in
               var result: [String] = []
               var current = ""
               var bytes = 0
               for character in line {
-                let count = String(character).utf8.count
+                let count = character == "█" || character == "░" ? 1 : String(character).utf8.count
                 if bytes + count > max(1, width - 1) && !current.isEmpty {
                   result.append(current)
                   current = ""
@@ -669,7 +722,7 @@ private final class InstallTerminal: @unchecked Sendable {
               if previousLines > 0 { output += "\u{1B}[\(previousLines)F" }
               let count = max(previousLines, lines.count)
               for index in 0..<count {
-                output += "\u{1B}[2K" + (index < lines.count ? lines[index] : "") + "\n"
+                output += "\u{1B}[2K" + (index < lines.count ? styled(lines[index]) : "") + "\n"
               }
               if count > lines.count { output += "\u{1B}[\(count - lines.count)F" }
               previousLines = lines.count
@@ -683,6 +736,43 @@ private final class InstallTerminal: @unchecked Sendable {
           })
       }
     }
+  }
+
+  private func styled(_ line: String) -> String {
+    guard colors else { return line }
+    let style: String?
+    if line.hasPrefix("  SOPHON") {
+      style = "1;36"
+    } else if line == "  COMPLETED" {
+      style = "1;32"
+    } else if line == "  FAILED" || line.hasPrefix("  Error") {
+      style = "1;31"
+    } else if line.hasPrefix("  CANCEL") || line.hasPrefix("  Retry") {
+      style = "1;33"
+    } else if ["  METADATA", "  VERIFICATION", "  TRIMMING", "  RUNNING"].contains(line)
+      || line.hasPrefix("  Read")
+    {
+      style = "1"
+    } else if line.hasPrefix("  Target") || line.hasPrefix("  Stage")
+      || line.hasPrefix("  Elapsed") || line.hasPrefix("  Latest")
+    {
+      style = "90"
+    } else {
+      style = nil
+    }
+    if let style { return "\u{1B}[\(style)m" + line + "\u{1B}[0m" }
+    var output = ""
+    var activeStyle = ""
+    for character in line {
+      let nextStyle = character == "█" ? "36" : (character == "░" ? "90" : "")
+      if nextStyle != activeStyle {
+        output += "\u{1B}[0m" + (nextStyle.isEmpty ? "" : "\u{1B}[\(nextStyle)m")
+        activeStyle = nextStyle
+      }
+      output.append(character)
+    }
+    if !activeStyle.isEmpty { output += "\u{1B}[0m" }
+    return output
   }
 }
 
