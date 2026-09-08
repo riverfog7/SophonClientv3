@@ -25,6 +25,7 @@ struct RequiredChunk: Sendable {
 }
 
 struct DownloadedChunk: Sendable {
+  let chunkID: String
   let md5: String
   let size: UInt64
   let data: Data
@@ -33,6 +34,7 @@ struct DownloadedChunk: Sendable {
 }
 
 struct ProcessedChunk: Sendable {
+  let chunkID: String
   let data: Data
   let chunkApplicationInfos: [ChunkApplicationInfo]
 }

@@ -15,33 +15,73 @@ final class ChunkCheckWorker: Sendable {
   }
 
   internal func run(
-    _ fileInfo: FileInfo
+    _ fileInfo: FileInfo,
+    reporter: (any OperationReporting<InstallationEvent>)? = nil
   ) async throws -> GameFileState {
     try Task.checkCancellation()
 
+    guard let reporter else {
+      return try await runOnce(fileInfo)
+    }
+
+    let events = AsyncStream<InstallationEvent>.makeStream(bufferingPolicy: .unbounded)
+    // Forward GCD-produced scan events through one structured task per file.
+    async let reporting: Void = {
+      for await event in events.stream {
+        await reporter.record(event)
+      }
+    }()
+
+    do {
+      let state = try await runOnce(fileInfo) { event in
+        events.continuation.yield(event)
+      }
+      events.continuation.finish()
+      await reporting
+      return state
+    } catch {
+      events.continuation.finish()
+      await reporting
+      throw error
+    }
+  }
+
+  private func runOnce(
+    _ fileInfo: FileInfo,
+    onEvent: @escaping @Sendable (InstallationEvent) -> Void = { _ in }
+  ) async throws -> GameFileState {
     return try await withCheckedThrowingContinuation { continuation in
       ioQueue.async { [self] in
         continuation.resume(
           with: Result {
-            try checkOnce(fileInfo)
+            try checkOnce(fileInfo, onEvent: onEvent)
           }
         )
       }
     }
   }
 
-  private func checkChunk(_ chunkInfo: borrowing ChunkInfo, _ handle: FileHandle) throws -> Bool {
+  private func checkChunk(
+    _ chunkInfo: borrowing ChunkInfo, _ handle: FileHandle, filePath: URL,
+    onEvent: @Sendable (InstallationEvent) -> Void
+  ) throws -> Bool {
     let size = Int(chunkInfo.uncompressedSize)
     // seeking to greater offset than file size is permitted
     // it will just return nil as data
     try handle.seek(toOffset: chunkInfo.offset)
     let data = try handle.read(upToCount: size) ?? Data()
     let matches = data.count == size && md5Hex(data) == chunkInfo.md5
+    onEvent(
+      .fileChunkScanned(
+        filePath: filePath, chunkID: chunkInfo.chunkID, isBroken: !matches,
+        offset: chunkInfo.offset, bytes: UInt64(data.count)))
 
     return matches
   }
 
-  private func checkOnce(_ fileInfo: borrowing FileInfo) throws -> GameFileState {
+  private func checkOnce(
+    _ fileInfo: borrowing FileInfo, onEvent: @Sendable (InstallationEvent) -> Void
+  ) throws -> GameFileState {
     try checkFileInfo(fileInfo)  // just in case it is used in other stuff
     let filePath = baseGameDir.appendingPathComponent(fileInfo.filename)
     guard let fileSize = UInt64(exactly: fileInfo.size) else {
@@ -66,6 +106,8 @@ final class ChunkCheckWorker: Sendable {
       guard isMissingFIle else {
         throw error
       }
+      onEvent(.fileMissing(filePath: filePath))
+      onEvent(.fileScanned(filePath: filePath, isBroken: true, needsTrimming: false))
       return GameFileState(
         filePath: filePath, needsTrimming: false, size: fileSize, md5: fileInfo.md5,
         requiredChunks: fileInfo.chunks)
@@ -76,11 +118,14 @@ final class ChunkCheckWorker: Sendable {
     let needsTrimming = try handle.seekToEnd() > fileSize
     var requiredChunks: [ChunkInfo] = []
     for chunk in chunks {
-      if try !checkChunk(chunk, handle) {
+      if try !checkChunk(chunk, handle, filePath: filePath, onEvent: onEvent) {
         requiredChunks.append(chunk)
       }
     }
 
+    onEvent(
+      .fileScanned(
+        filePath: filePath, isBroken: !requiredChunks.isEmpty, needsTrimming: needsTrimming))
     return GameFileState(
       filePath: filePath, needsTrimming: needsTrimming, size: fileSize, md5: fileInfo.md5,
       requiredChunks: requiredChunks)

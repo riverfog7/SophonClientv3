@@ -4,10 +4,12 @@ import Foundation
 final class ChunkWriteCoordinator: Sendable {
   private let workers: [ChunkWriteWorker]
   private let tracker: FileCompletionTracker
+  private let reporter: (any OperationReporting<InstallationEvent>)?
 
   init(
     plannedFiles: [PlannedFile],
-    workerCount: Int
+    workerCount: Int,
+    reporter: (any OperationReporting<InstallationEvent>)? = nil
   ) throws {
     guard workerCount > 0 else {
       throw SophonClientError.UnknownError(
@@ -20,6 +22,7 @@ final class ChunkWriteCoordinator: Sendable {
     self.tracker = try FileCompletionTracker(
       plannedFiles: plannedFiles
     )
+    self.reporter = reporter
   }
 
   internal func write(
@@ -35,11 +38,16 @@ final class ChunkWriteCoordinator: Sendable {
           applicationInfo: application
         )
       )
+      await reporter?.record(
+        .chunkWritten(
+          filePath: application.fileURL, chunkID: chunk.chunkID,
+          offset: application.offset, bytes: UInt64(chunk.data.count)))
 
       if let completedFile = try await tracker.completeWrite(
         to: application.fileURL
       ) {
         try await worker.close(completedFile.fileURL)
+        await reporter?.record(.fileCompleted(filePath: completedFile.fileURL))
       }
     }
   }

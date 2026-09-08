@@ -60,10 +60,14 @@ final class Installer: Sendable {
     }
   }
 
-  internal func scan(installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)])
+  internal func scan(
+    installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
+    reporter: (any OperationReporting<InstallationEvent>)? = nil
+  )
     async throws
     -> InstallationPlan
   {
+    await reporter?.record(.phaseChanged(.scanning))
     let manifests = installInfos.map(\.manifest)
     let chunkDownloadInfos = installInfos.map(\.chunkDownloadInfo)
     try checkManifests(manifests)  // this checks fileInfo too
@@ -107,7 +111,7 @@ final class Installer: Sendable {
 
         group.addTask {
           ScanResult(
-            state: try await checker.run(job.file),
+            state: try await checker.run(job.file, reporter: reporter),
             downloadInfo: job.downloadInfo
           )
         }
@@ -117,13 +121,16 @@ final class Installer: Sendable {
         if let job = nextJob() {
           group.addTask {
             ScanResult(
-              state: try await checker.run(job.file),
+              state: try await checker.run(job.file, reporter: reporter),
               downloadInfo: job.downloadInfo
             )
           }
         }
 
         let state = result.state
+        if state.requiredChunks.isEmpty && !state.needsTrimming {
+          await reporter?.record(.fileCompleted(filePath: state.filePath))
+        }
         plannedFiles.append(
           PlannedFile(
             fileURL: state.filePath, size: state.size, md5: state.md5,
@@ -160,6 +167,10 @@ final class Installer: Sendable {
       let diskWriteSize = requiredChunks.reduce(UInt64(0)) {
         $0 + $1.uncompressedSize * UInt64($1.chunkApplicationInfos.count)
       }
+      await reporter?.record(
+        .planned(
+          downloadBytes: downloadSize, writeBytes: diskWriteSize,
+          totalChunk: requiredChunks.count, totalFile: plannedFiles.count))
       return InstallationPlan(
         totalChunkCount: requiredChunks.count,
         downloadSize: downloadSize,
@@ -202,21 +213,36 @@ final class Installer: Sendable {
     }
   }
 
-  internal func install(installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)])
+  internal func install(
+    installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
+    reporter: (any OperationReporting<InstallationEvent>)? = nil
+  )
     async throws
   {
-    try Task.checkCancellation()
+    do {
+      try Task.checkCancellation()
 
-    let plan = try await scan(installInfos: installInfos)
-    try trimFiles(plan: plan)
-    try Task.checkCancellation()
+      let plan = try await scan(installInfos: installInfos, reporter: reporter)
+      await reporter?.record(.phaseChanged(.trimming))
+      try await trimFiles(plan: plan, reporter: reporter)
+      try Task.checkCancellation()
 
-    try await execute(plan)
+      try await execute(plan, reporter: reporter)
+      await reporter?.record(.finished(.completed))
+    } catch {
+      if error is CancellationError || Task.isCancelled {
+        await reporter?.record(.finished(.cancelled))
+      } else {
+        await reporter?.record(.finished(.failed(reason: error.localizedDescription)))
+      }
+      throw error
+    }
   }
 
   private func trimFiles(
-    plan: InstallationPlan
-  ) throws {
+    plan: InstallationPlan,
+    reporter: (any OperationReporting<InstallationEvent>)?
+  ) async throws {
     for file in plan.trimFiles {
       try Task.checkCancellation()
 
@@ -237,6 +263,9 @@ final class Installer: Sendable {
 
         try handle.truncate(atOffset: file.size)
         try handle.close()
+        if file.requiredChunkCount == 0 {
+          await reporter?.record(.fileCompleted(filePath: fileURL))
+        }
       } catch {
         try? handle.close()
         throw error
@@ -245,15 +274,18 @@ final class Installer: Sendable {
   }
 
   internal func execute(
-    _ plan: InstallationPlan
+    _ plan: InstallationPlan,
+    reporter: (any OperationReporting<InstallationEvent>)? = nil
   ) async throws {
+    await reporter?.record(.phaseChanged(.running))
     let requiredChunks = AsyncChannel<RequiredChunk>()
     let downloadedChunks = AsyncChannel<DownloadedChunk>()
     let processedChunks = AsyncChannel<ProcessedChunk>()
 
     let writeCoordinator = try ChunkWriteCoordinator(
       plannedFiles: plan.plannedFiles,
-      workerCount: maxCocurrentWrites
+      workerCount: maxCocurrentWrites,
+      reporter: reporter
     )
 
     do {
@@ -275,7 +307,7 @@ final class Installer: Sendable {
             input: requiredChunks,
             output: downloadedChunks
           ) { [self] chunk in
-            try await download(chunk)
+            try await download(chunk, reporter: reporter)
           }
         }
 
@@ -285,7 +317,12 @@ final class Installer: Sendable {
             input: downloadedChunks,
             output: processedChunks
           ) { [self] chunk in
-            try postProcessChunk(chunk)
+            let processed = try postProcessChunk(chunk)
+            await reporter?.record(
+              .chunkPostProcessed(
+                chunkID: chunk.chunkID, compressed_bytes: UInt64(chunk.data.count),
+                uncompressed_bytes: UInt64(processed.data.count)))
+            return processed
           }
         }
 
@@ -318,7 +355,10 @@ final class Installer: Sendable {
     }
   }
 
-  private func download(_ chunk: RequiredChunk) async throws -> DownloadedChunk {
+  private func download(
+    _ chunk: RequiredChunk,
+    reporter: (any OperationReporting<InstallationEvent>)?
+  ) async throws -> DownloadedChunk {
     guard !chunk.downloadInfo.encryption,
       chunk.downloadInfo.password.isEmpty
     else {
@@ -330,21 +370,25 @@ final class Installer: Sendable {
     let downloadURL = try chunk.getDownloadURL()
     let md5 = chunk.downloadInfo.compression ? chunk.compressedMd5 : chunk.uncompressedMd5
     let size = chunk.downloadInfo.compression ? chunk.compressedSize : chunk.uncompressedSize
-    let data = try await downloader.run(DownloadRequest(url: downloadURL, md5: md5, size: size))
+    let data = try await downloader.run(
+      DownloadRequest(chunkID: chunk.chunkID, url: downloadURL, md5: md5, size: size),
+      reporter: reporter)
 
     return DownloadedChunk(
-      md5: chunk.uncompressedMd5, size: chunk.uncompressedSize, data: data,
+      chunkID: chunk.chunkID, md5: chunk.uncompressedMd5, size: chunk.uncompressedSize, data: data,
       downloadInfo: chunk.downloadInfo,
       chunkApplicationInfos: chunk.chunkApplicationInfos)
   }
 
   private func postProcessChunk(_ chunk: DownloadedChunk) throws -> ProcessedChunk {
     if !chunk.downloadInfo.compression {
-      return ProcessedChunk(data: chunk.data, chunkApplicationInfos: chunk.chunkApplicationInfos)
+      return ProcessedChunk(
+        chunkID: chunk.chunkID, data: chunk.data, chunkApplicationInfos: chunk.chunkApplicationInfos)
     }
 
     let data = try postProcessor.run(
       ChunkPostProcessRequest(size: chunk.size, md5: chunk.md5, data: chunk.data))
-    return ProcessedChunk(data: data, chunkApplicationInfos: chunk.chunkApplicationInfos)
+    return ProcessedChunk(
+      chunkID: chunk.chunkID, data: data, chunkApplicationInfos: chunk.chunkApplicationInfos)
   }
 }

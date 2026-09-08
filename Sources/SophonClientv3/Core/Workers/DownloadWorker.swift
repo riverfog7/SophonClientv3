@@ -33,12 +33,18 @@ struct DownloadWorker: Sendable {
     return data
   }
 
-  internal func run(_ downloadRequest: DownloadRequest) async throws -> Data {
+  internal func run(
+    _ downloadRequest: DownloadRequest,
+    reporter: (any OperationReporting<InstallationEvent>)? = nil
+  ) async throws -> Data {
     var lastError: Error?
 
     for attempt in 0...maxRetries {
       do {
-        return try await downloadOnce(downloadRequest)
+        let data = try await downloadOnce(downloadRequest)
+        await reporter?.record(
+          .chunkDownloaded(chunkID: downloadRequest.chunkID, bytes: UInt64(data.count)))
+        return data
       } catch {
         try Task.checkCancellation()
 
@@ -55,6 +61,11 @@ struct DownloadWorker: Sendable {
         lastError = error
 
         if attempt < maxRetries {
+          // Report the one-based number of the upcoming attempt.
+          await reporter?.record(
+            .retryScheduled(
+              chunkID: downloadRequest.chunkID, attempt: attempt + 2,
+              reason: error.localizedDescription))
           try await Task.sleep(for: .seconds(retryInterval))
         }
       }
