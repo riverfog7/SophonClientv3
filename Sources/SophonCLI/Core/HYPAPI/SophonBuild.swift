@@ -94,7 +94,7 @@ struct SophonBuildCLI: AsyncParsableCommand {
       let encoder = YAMLEncoder()
       encoder.options.allowUnicode = true
       encoder.options.sortKeys = true
-      encoder.options.indent = 2
+      encoder.options.indent = 4
 
       if isPatch {
         let info = try await client.getSophonPatchBuildInfo(gameSubBranch)
