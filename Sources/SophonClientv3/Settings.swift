@@ -1,16 +1,69 @@
 public struct SophonClientSettings: Codable {
-  let baseURL: String
-  let sophonBaseURL: String
-  var maxRetries: Int = 10
-  var retryInterval: Int = 5
-  let launcherID: String
-  let gameID: String
-  let manifestCacheDir: String
-  var logStdout: Bool = true
-  var logFile: String? = nil
+  public let baseURL: String
+  public let sophonBaseURL: String
+  public var maxRetries: Int
+  public var retryInterval: Int
+  public let launcherID: String
+  public let gameID: String
+  public let manifestCacheDir: String
+  public var logStdout: Bool
+  public var logFile: String?
 
-  var maxCocurrentChecks: Int = 8
-  var maxCocurrentDownloads: Int = 8
-  var maxCocurrentPostProcessors: Int = 4
-  var maxCocurrentWrites: Int = 4
+  public var maxCocurrentChecks: Int
+  public var maxCocurrentDownloads: Int
+  public var maxCocurrentPostProcessors: Int
+  public var maxCocurrentWrites: Int
+
+  public init(
+    baseURL: String, sophonBaseURL: String, maxRetries: Int = 10, retryInterval: Int = 5,
+    launcherID: String, gameID: String, manifestCacheDir: String,
+    logStdout: Bool = true, logFile: String? = nil,
+    maxCocurrentChecks: Int = 8, maxCocurrentDownloads: Int = 8,
+    maxCocurrentPostProcessors: Int = 4, maxCocurrentWrites: Int = 4
+  ) {
+    self.baseURL = baseURL
+    self.sophonBaseURL = sophonBaseURL
+    self.maxRetries = maxRetries
+    self.retryInterval = retryInterval
+    self.launcherID = launcherID
+    self.gameID = gameID
+    self.manifestCacheDir = manifestCacheDir
+    self.logStdout = logStdout
+    self.logFile = logFile
+    self.maxCocurrentChecks = maxCocurrentChecks
+    self.maxCocurrentDownloads = maxCocurrentDownloads
+    self.maxCocurrentPostProcessors = maxCocurrentPostProcessors
+    self.maxCocurrentWrites = maxCocurrentWrites
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case baseURL, sophonBaseURL, maxRetries, retryInterval, launcherID, gameID, manifestCacheDir
+    case logStdout, logFile
+    case maxCocurrentChecks, maxCocurrentDownloads, maxCocurrentPostProcessors, maxCocurrentWrites
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      baseURL: try container.decode(String.self, forKey: .baseURL),
+      sophonBaseURL: try container.decode(String.self, forKey: .sophonBaseURL),
+      launcherID: try container.decode(String.self, forKey: .launcherID),
+      gameID: try container.decode(String.self, forKey: .gameID),
+      manifestCacheDir: try container.decode(String.self, forKey: .manifestCacheDir))
+
+    maxRetries = try container.decodeIfPresent(Int.self, forKey: .maxRetries) ?? maxRetries
+    retryInterval = try container.decodeIfPresent(Int.self, forKey: .retryInterval) ?? retryInterval
+    logStdout = try container.decodeIfPresent(Bool.self, forKey: .logStdout) ?? logStdout
+    logFile = try container.decodeIfPresent(String.self, forKey: .logFile)
+    maxCocurrentChecks =
+      try container.decodeIfPresent(Int.self, forKey: .maxCocurrentChecks) ?? maxCocurrentChecks
+    maxCocurrentDownloads =
+      try container.decodeIfPresent(Int.self, forKey: .maxCocurrentDownloads)
+      ?? maxCocurrentDownloads
+    maxCocurrentPostProcessors =
+      try container.decodeIfPresent(Int.self, forKey: .maxCocurrentPostProcessors)
+      ?? maxCocurrentPostProcessors
+    maxCocurrentWrites =
+      try container.decodeIfPresent(Int.self, forKey: .maxCocurrentWrites) ?? maxCocurrentWrites
+  }
 }

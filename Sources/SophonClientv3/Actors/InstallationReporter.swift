@@ -11,11 +11,11 @@ public actor InstallationReporter: OperationReporting {
     self.logger = logger
   }
 
-  func snapshot() -> InstallationProgress {
+  public func snapshot() -> InstallationProgress {
     progress
   }
 
-  func subscribe() -> (
+  public func subscribe() -> (
     id: UUID,
     progress: InstallationProgress,
     events: AsyncStream<InstallationEvent>
@@ -40,7 +40,7 @@ public actor InstallationReporter: OperationReporting {
     return (id, progress, pair.stream)
   }
 
-  func unsubscribe(_ id: UUID) {
+  public func unsubscribe(_ id: UUID) {
     subscribers.removeValue(forKey: id)?.finish()
   }
 

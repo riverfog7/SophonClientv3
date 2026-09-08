@@ -41,15 +41,15 @@ public enum InstallationEvent: Sendable {
 }
 
 public struct InstallationProgress: Sendable {
-  var phase: InstallationPhase = .metadata
-  var totalDownloadBytes: UInt64?
-  var totalWriteBytes: UInt64?
-  var totalChunk: Int?
-  var totalFile: Int?
-  var downloadedBytes: UInt64 = 0
-  var writtenBytes: UInt64 = 0
-  var scannedFiles: Int = 0
-  var completedFiles: Int = 0
-  var completedChunks: Int = 0
-  var outcome: InstallationOutcome?
+  public internal(set) var phase: InstallationPhase = .metadata
+  public internal(set) var totalDownloadBytes: UInt64?
+  public internal(set) var totalWriteBytes: UInt64?
+  public internal(set) var totalChunk: Int?
+  public internal(set) var totalFile: Int?
+  public internal(set) var downloadedBytes: UInt64 = 0
+  public internal(set) var writtenBytes: UInt64 = 0
+  public internal(set) var scannedFiles: Int = 0
+  public internal(set) var completedFiles: Int = 0
+  public internal(set) var completedChunks: Int = 0
+  public internal(set) var outcome: InstallationOutcome?
 }
