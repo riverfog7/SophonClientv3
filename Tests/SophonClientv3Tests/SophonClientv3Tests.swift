@@ -29,7 +29,8 @@ func testManifestParse(
   baseURL: String, sophonBaseURL: String, launcherID: String, gameList: [String]
 ) async throws {
   let cacheDir = getTestDataPath().appendingPathComponent("manifestCache")
-  let installerTempDir = getTestDataPath().appendingPathComponent("installerTemp-\(UUID().uuidString)")
+  let installerTempDir = getTestDataPath().appendingPathComponent(
+    "installerTemp-\(UUID().uuidString)")
   for gameID in gameList {
     let settings = SophonClientSettings(
       baseURL: baseURL, sophonBaseURL: sophonBaseURL,

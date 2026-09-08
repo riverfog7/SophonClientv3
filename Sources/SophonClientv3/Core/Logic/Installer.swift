@@ -383,7 +383,8 @@ final class Installer: Sendable {
   private func postProcessChunk(_ chunk: DownloadedChunk) throws -> ProcessedChunk {
     if !chunk.downloadInfo.compression {
       return ProcessedChunk(
-        chunkID: chunk.chunkID, data: chunk.data, chunkApplicationInfos: chunk.chunkApplicationInfos)
+        chunkID: chunk.chunkID, data: chunk.data, chunkApplicationInfos: chunk.chunkApplicationInfos
+      )
     }
 
     let data = try postProcessor.run(
