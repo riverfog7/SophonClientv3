@@ -29,11 +29,11 @@ func testManifestParse(
   baseURL: String, sophonBaseURL: String, launcherID: String, gameList: [String]
 ) async throws {
   let cacheDir = getTestDataPath().appendingPathComponent("manifestCache")
-  let installerTempDir = getTestDataPath().appendingPathComponent("installerTemp")
-  for gameBiz in gameList {
+  let installerTempDir = getTestDataPath().appendingPathComponent("installerTemp-\(UUID().uuidString)")
+  for gameID in gameList {
     let settings = SophonClientSettings(
       baseURL: baseURL, sophonBaseURL: sophonBaseURL,
-      launcherID: launcherID, gameBiz: gameBiz,
+      launcherID: launcherID, gameID: gameID,
       manifestCacheDir: cacheDir.path())
     let client = try await SophonClientv3(settings)
     let subBranch = try await client.manifestManager.getGameSubbranch(predownload: false)
@@ -72,25 +72,42 @@ func testManifestParse(
       baseGameDir: installerTempDir, maxCocurrentChecks: 8, maxCocurrentDownloads: 8,
       maxCocurrentPostProcessors: 8, maxCocurrentWrites: 8)
     let installationPlan = try await installer.scan(installInfos: installInfos)
-    print("total chunk count for \(gameBiz): \(installationPlan.totalChunkCount)")
+    print("total chunk count for \(gameID): \(installationPlan.totalChunkCount)")
     print(
-      "download size for \(gameBiz): \(Double(installationPlan.downloadSize) / 1_073_741_824) GiB")
+      "download size for \(gameID): \(Double(installationPlan.downloadSize) / 1_073_741_824) GiB")
     print(
-      "disk write size for \(gameBiz): \(Double(installationPlan.diskWriteSize) / 1_073_741_824) GiB"
+      "disk write size for \(gameID): \(Double(installationPlan.diskWriteSize) / 1_073_741_824) GiB"
     )
   }
+  try? FileManager.default.removeItem(at: installerTempDir)
 }
 
 @Test
 func testOSManifestParse() async throws {
   try await testManifestParse(
     baseURL: HYPAPI_OS_BASE_URL, sophonBaseURL: SOPHON_API_OS_BASE_URL,
-    launcherID: HYPAPI_OS_LAUNCHER_ID, gameList: ["hkrpg_global", "hk4e_global", "nap_global"])
+    launcherID: HYPAPI_OS_LAUNCHER_ID,
+    gameList: [
+      "U5hbdsT9W7",
+      "4ziysqXOQ8",
+      "gopR6Cufr3",
+      "5TIVvvcwtM",
+      "g0mMIvshDb",
+      "uxB4MC7nzC",
+      "bxPTXSET5t",
+      "wkE5P5WsIf",
+    ])
 }
 
 @Test
 func testCNManifestParse() async throws {
   try await testManifestParse(
     baseURL: HYPAPI_CN_BASE_URL, sophonBaseURL: SOPHON_API_CN_BASE_URL,
-    launcherID: HYPAPI_CN_LAUNCHER_ID, gameList: ["hkrpg_cn", "hk4e_cn", "nap_cn"])
+    launcherID: HYPAPI_CN_LAUNCHER_ID,
+    gameList: [
+      "x6znKlJ0xK",
+      "64kMb5iAWu",
+      "1Z8W5NHUQb",
+      "osvnlOc0S8",
+    ])
 }

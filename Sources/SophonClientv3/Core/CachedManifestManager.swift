@@ -19,22 +19,22 @@ class CachedManifestManager {
   private let gameBranches: GameBranches
 
   internal init(
-    baseURL: String, sophonBaseURL: String, launcherID: String, gameBiz: String,
+    baseURL: String, sophonBaseURL: String, launcherID: String, gameID: String,
     manifestCacheDir: String, maxRetries: Int = 10,
     retryInterval: Int = 5, session: URLSession = .shared
   ) async throws {
     self.session = session
-    self.gameBiz = gameBiz
+    self.gameID = gameID
     self.maxRetries = maxRetries
     self.retryInterval = retryInterval
     self.apiClient = try HYPAPIClient(
       baseURL: baseURL, sophonBaseURL: sophonBaseURL, launcherID: launcherID,
       maxRetries: maxRetries, retryInterval: retryInterval, session: session)
-    guard let temp = try await apiClient.getGameConfigs().findBy(biz: gameBiz) else {
-      throw SophonClientError.CannotFindValidGameError(gameBiz)
+    guard let temp = try await apiClient.getGameConfigs().findBy(id: gameID) else {
+      throw SophonClientError.CannotFindValidGameError(gameID)
     }
     gameLaunchConfig = temp
-    gameID = gameLaunchConfig.game.id
+    gameBiz = temp.game.biz
     gameBranches = try await apiClient.getGameBranches()
 
     self.manifestCacheDir = URL(filePath: manifestCacheDir)

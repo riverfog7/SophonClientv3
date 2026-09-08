@@ -6,7 +6,7 @@ import HYPAPIClient
 #endif
 
 class SophonClientv3 {
-  private let gameBiz: String
+  private let gameID: String
   private let maxRetries: Int
   private let retryInterval: Int
   internal let manifestManager: CachedManifestManager
@@ -17,12 +17,12 @@ class SophonClientv3 {
   )
     async throws
   {
-    self.gameBiz = settings.gameBiz
+    self.gameID = settings.gameID
     self.maxRetries = settings.maxRetries
     self.retryInterval = settings.retryInterval
     self.manifestManager = try await CachedManifestManager(
       baseURL: settings.baseURL, sophonBaseURL: settings.sophonBaseURL,
-      launcherID: settings.launcherID, gameBiz: settings.gameBiz,
+      launcherID: settings.launcherID, gameID: settings.gameID,
       manifestCacheDir: settings.manifestCacheDir, maxRetries: settings.maxRetries,
       retryInterval: settings.retryInterval)
     self.gameLaunchConfig = manifestManager.getGameLaunchConfig()

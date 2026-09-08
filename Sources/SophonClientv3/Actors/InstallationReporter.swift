@@ -5,9 +5,7 @@ actor InstallationReporter: OperationReporting {
   private let logger: Logger
   private var progress = InstallationProgress()
 
-  private var subscribers: [
-    UUID: AsyncStream<InstallationEvent>.Continuation
-  ] = [:]
+  private var subscribers: [UUID: AsyncStream<InstallationEvent>.Continuation] = [:]
 
   init(logger: Logger) {
     self.logger = logger

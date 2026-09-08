@@ -4,6 +4,6 @@ struct SophonClientSettings: Codable {
   var maxRetries: Int = 10
   var retryInterval: Int = 5
   let launcherID: String
-  let gameBiz: String
+  let gameID: String
   let manifestCacheDir: String
 }
