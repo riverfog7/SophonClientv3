@@ -74,7 +74,8 @@ final class ChunkCheckWorker: Sendable {
     onEvent(
       .fileChunkScanned(
         filePath: filePath, chunkID: chunkInfo.chunkID, isBroken: !matches,
-        offset: chunkInfo.offset, bytes: UInt64(data.count)))
+        offset: chunkInfo.offset, bytes: UInt64(data.count),
+        expectedBytes: UInt64(chunkInfo.uncompressedSize)))
 
     return matches
   }
@@ -106,7 +107,10 @@ final class ChunkCheckWorker: Sendable {
       guard isMissingFIle else {
         throw error
       }
-      onEvent(.fileMissing(filePath: filePath))
+      onEvent(
+        .fileMissing(
+          filePath: filePath, chunkCount: chunks.count,
+          expectedBytes: chunks.reduce(UInt64(0)) { $0 + UInt64($1.uncompressedSize) }))
       onEvent(.fileScanned(filePath: filePath, isBroken: true, needsTrimming: false))
       return GameFileState(
         filePath: filePath, needsTrimming: false, size: fileSize, md5: fileInfo.md5,

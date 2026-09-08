@@ -19,14 +19,20 @@ public enum InstallationOutcome: Sendable {
 
 public enum InstallationEvent: Sendable {
   // metadata stage
+  case metadataPlanned(totalManifests: Int)
   case manifestPulled(matchingField: String, predownload: Bool)
 
   // scanning stage
-  case fileMissing(filePath: URL)
+  case scanPlanned(totalFiles: Int, totalChunks: Int, totalBytes: UInt64)
+  case fileMissing(filePath: URL, chunkCount: Int, expectedBytes: UInt64)
   case fileChunkScanned(
-    filePath: URL, chunkID: String, isBroken: Bool, offset: UInt64, bytes: UInt64)
+    filePath: URL, chunkID: String, isBroken: Bool, offset: UInt64, bytes: UInt64,
+    expectedBytes: UInt64)
   case fileScanned(filePath: URL, isBroken: Bool, needsTrimming: Bool)
   case planned(downloadBytes: UInt64, writeBytes: UInt64, totalChunk: Int, totalFile: Int)
+
+  // trimming stage
+  case fileTrimmed(filePath: URL)
 
   // download stage
   case chunkDownloaded(chunkID: String, bytes: UInt64)

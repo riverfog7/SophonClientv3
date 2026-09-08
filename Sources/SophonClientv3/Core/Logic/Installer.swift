@@ -72,6 +72,21 @@ final class Installer: Sendable {
     let chunkDownloadInfos = installInfos.map(\.chunkDownloadInfo)
     try checkManifests(manifests)  // this checks fileInfo too
 
+    var totalFiles = 0
+    var totalChunks = 0
+    var totalBytes: UInt64 = 0
+    for manifest in manifests {
+      for file in manifest.files where file.flags == FILE_FLAG_FILE {
+        totalFiles += 1
+        totalChunks += file.chunks.count
+        for chunk in file.chunks {
+          totalBytes += UInt64(chunk.uncompressedSize)
+        }
+      }
+    }
+    await reporter?.record(
+      .scanPlanned(totalFiles: totalFiles, totalChunks: totalChunks, totalBytes: totalBytes))
+
     var manifestIndex = 0
     var fileIndex = 0
     func nextJob() -> ScanJob? {
@@ -263,6 +278,7 @@ final class Installer: Sendable {
 
         try handle.truncate(atOffset: file.size)
         try handle.close()
+        await reporter?.record(.fileTrimmed(filePath: fileURL))
         if file.requiredChunkCount == 0 {
           await reporter?.record(.fileCompleted(filePath: fileURL))
         }

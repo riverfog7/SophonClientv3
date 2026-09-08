@@ -50,6 +50,9 @@ public actor InstallationReporter: OperationReporting {
     }
 
     switch event {
+    case .metadataPlanned(let totalManifests):
+      logger.info("Installation metadata planned", metadata: ["manifests.total": "\(totalManifests)"])
+
     case .manifestPulled(let matchingField, let predownload):
       logger.info(
         "Sophon manifest downloaded",
@@ -60,10 +63,21 @@ public actor InstallationReporter: OperationReporting {
 
       )
 
-    case .fileMissing(let filePath):
+    case .scanPlanned(let totalFiles, let totalChunks, let totalBytes):
+      logger.info(
+        "Installation scan planned",
+        metadata: [
+          "files.total": "\(totalFiles)", "chunks.total": "\(totalChunks)",
+          "scan.bytes": "\(totalBytes)",
+        ])
+
+    case .fileMissing(let filePath, let chunkCount, let expectedBytes):
       logger.debug(
         "File is missing",
-        metadata: ["file.path": "\(filePath.absoluteURL.path)"]
+        metadata: [
+          "file.path": "\(filePath.absoluteURL.path)", "chunks.count": "\(chunkCount)",
+          "expected.bytes": "\(expectedBytes)",
+        ]
       )
 
     case .fileChunkScanned(
@@ -71,7 +85,8 @@ public actor InstallationReporter: OperationReporting {
       let chunkID,
       let isBroken,
       let offset,
-      let bytes
+      let bytes,
+      let expectedBytes
     ):
       logger.log(
         level: isBroken ? .warning : .debug,
@@ -82,6 +97,7 @@ public actor InstallationReporter: OperationReporting {
           "chunk.broken": "\(isBroken)",
           "chunk.offset": "\(offset)",
           "chunk.bytes": "\(bytes)",
+          "chunk.expectedBytes": "\(expectedBytes)",
         ]
       )
 
@@ -96,6 +112,9 @@ public actor InstallationReporter: OperationReporting {
           "file.needsTrimming": "\(needsTrimming)",
         ]
       )
+
+    case .fileTrimmed(let filePath):
+      logger.debug("File trimmed", metadata: ["file.path": "\(filePath.absoluteURL.path)"])
 
     case .planned(
       let downloadBytes,

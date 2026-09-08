@@ -114,6 +114,7 @@ public class SophonClientv3 {
         seen.insert($0).inserted
       }
 
+      await reporter.record(.metadataPlanned(totalManifests: matchingFields.count))
       for matchingField in matchingFields {
         try Task.checkCancellation()
 
