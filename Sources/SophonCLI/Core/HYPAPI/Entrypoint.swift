@@ -7,7 +7,7 @@ struct HYPAPIClientEntrypoint: AsyncParsableCommand {
     subcommands: [
       SophonBuildCLI.self, GamesCLI.self, GameConfigsCLI.self, GameBranchesCLI.self,
       GameScanInfoCLI.self, WPFPackagesCLI.self, ResolveGameCLI.self, GameInfoCLI.self,
-      LookupVersionCLI.self, CompareBranchesCLI.self,
+      LookupVersionCLI.self, CompareBranchesCLI.self, CheckUpdatePathCLI.self,
     ],
   )
 }
