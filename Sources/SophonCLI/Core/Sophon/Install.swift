@@ -45,7 +45,7 @@ struct InstallCLI: AsyncParsableCommand, Sendable {
 
   @Option(
     name: .customLong("voice-pack"),
-    help: "Audio matching field; repeat for multiple packs. Installed packs are not auto-detected.")
+    help: "Audio matching field; repeat for multiple packs. Installed packs are auto-detected.")
   var voicePacks: [String] = []
 
   @Flag(help: "Install the predownload branch into the destination; NOT download-only caching.")

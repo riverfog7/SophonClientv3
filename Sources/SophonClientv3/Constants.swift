@@ -8,3 +8,14 @@ let SOPHON_API_OS_BASE_URL = "https://sg-public-api.hoyoverse.com/downloader/sop
 
 let FILE_FLAG_FILE = 0
 let FILE_FLAG_DIRECTORY = 64
+
+// From Collapse launcher
+// Source: https://github.com/CollapseLauncher/Collapse/blob/main/CollapseLauncher/Classes/InstallManagement/Base/InstallManagerBase.cs#L1895
+let AUDIO_LANG_TO_CODE = [
+  "Korean": "ko-kr",
+  "English(US)": "en-us",
+  "English": "en-us",
+  "Japanese": "ja-jp",
+  "Chinese": "zh-cn",
+  "Chinese(PRC)": "zh-cn",
+]

@@ -73,12 +73,31 @@ public class SophonClientv3 {
   }
 
   private func getInstalledVoicePacks() throws -> Set<String> {
-    // TODO: detect installed voice packs from the game directory instead of returning an empty set
-    let _ = manifestManager.getGameLaunchConfig()
-    return Set<String>()
+    let audioPkgFile = baseGameDir.appendingPathComponent(gameLaunchConfig.audioPkgScanDir)
+
+    var isDirectory: ObjCBool = false
+    guard
+      FileManager.default.fileExists(atPath: audioPkgFile.path, isDirectory: &isDirectory)
+        && !isDirectory.boolValue
+    else {
+      return []
+    }
+
+    var codes: Set<String> = []
+    let contents = try String(contentsOf: audioPkgFile, encoding: .utf8)
+    for line in contents.split(whereSeparator: \.isNewline) {
+      let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmedLine.isEmpty else { continue }
+
+      guard let langCode = AUDIO_LANG_TO_CODE[trimmedLine] else {
+        throw SophonClientError.UnknownError("Audio language \(trimmedLine) is not suported")
+      }
+      codes.insert(langCode)
+    }
+    return codes
   }
 
-  private func decodeResCategory() async throws -> Set<ResCategory> {
+  private func decodeResCategory() throws -> Set<ResCategory> {
     if gameLaunchConfig.resCategoryDir.isEmpty { return [] }
     let resCategoryDir = baseGameDir.appendingPathComponent(gameLaunchConfig.resCategoryDir)
     var isDirectory: ObjCBool = false
@@ -113,7 +132,7 @@ public class SophonClientv3 {
 
   private func getRemovedCategoryIDs() async throws -> Set<String> {
     var items: Set<String> = []
-    for category in try await decodeResCategory() {
+    for category in try decodeResCategory() {
       if category.isDelete {
         items.insert(category.category)
       }
