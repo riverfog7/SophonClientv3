@@ -6,7 +6,7 @@ struct HYPAPIClientEntrypoint: AsyncParsableCommand {
     abstract: "HYP API client",
     subcommands: [
       SophonBuildCLI.self, GamesCLI.self, GameConfigsCLI.self, GameBranchesCLI.self,
-      GameScanInfoCLI.self, WPFPackagesCLI.self,
+      GameScanInfoCLI.self, WPFPackagesCLI.self, ResolveGameCLI.self,
     ],
   )
 }
