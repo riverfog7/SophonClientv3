@@ -90,7 +90,7 @@ public actor InstallationReporter: OperationReporting {
       let expectedBytes
     ):
       logger.log(
-        level: isBroken ? .warning : .debug,
+        level: .debug,
         "File chunk scanned",
         metadata: [
           "file.path": "\(filePath.absoluteURL.path)",
