@@ -12,6 +12,7 @@ public class SophonClientv3 {
   private let gameID: String
   private let gameBiz: String
   private let logger: Logger
+  private let puppy: Puppy
   private let installer: Installer
   internal let manifestManager: CachedManifestManager
   private let gameLaunchConfig: GameLaunchConfig
@@ -41,6 +42,7 @@ public class SophonClientv3 {
             URL(fileURLWithPath: path).absoluteURL, writeMode: .print),
       )
     }
+    self.puppy = puppy
     self.logger = Logger(label: "SophonClientv3") { [puppy] label in
       guard !puppy.loggers.isEmpty else {
         return SwiftLogNoOpLogHandler()
@@ -59,7 +61,7 @@ public class SophonClientv3 {
       maxCocurrentDownloads: settings.maxCocurrentDownloads,
       maxCocurrentPostProcessors: settings.maxCocurrentPostProcessors,
       maxCocurrentWrites: settings.maxCocurrentWrites, maxRetries: settings.maxRetries,
-      retryInterval: settings.retryInterval)
+      retryInterval: settings.retryInterval, maxCachedFileHandles: settings.maxCachedFileHandles)
     self.gameLaunchConfig = manifestManager.getGameLaunchConfig()
     self.gameBiz = gameLaunchConfig.game.biz
   }
@@ -70,6 +72,14 @@ public class SophonClientv3 {
     runLogger[metadataKey: "operation.id"] = "\(id)"
 
     return InstallationReporter(logger: runLogger)
+  }
+
+  public func flushLogs() async {
+    for backend in puppy.loggers {
+      await withCheckedContinuation { continuation in
+        backend.flush { continuation.resume() }
+      }
+    }
   }
 
   private func getInstalledVoicePacks() throws -> Set<String> {

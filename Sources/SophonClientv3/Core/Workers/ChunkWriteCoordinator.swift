@@ -9,6 +9,7 @@ final class ChunkWriteCoordinator: Sendable {
   init(
     plannedFiles: [PlannedFile],
     workerCount: Int,
+    maxCachedFileHandles: Int = 512,
     reporter: (any OperationReporting<InstallationEvent>)? = nil
   ) throws {
     guard workerCount > 0 else {
@@ -16,8 +17,13 @@ final class ChunkWriteCoordinator: Sendable {
         "Write worker count must be positive"
       )
     }
-    self.workers = (0..<workerCount).map {
-      ChunkWriteWorker(index: $0)
+    guard maxCachedFileHandles >= workerCount else {
+      throw SophonClientError.UnknownError(
+        "File handle cache budget must allow at least one handle per disk writer"
+      )
+    }
+    self.workers = try (0..<workerCount).map {
+      try ChunkWriteWorker(index: $0, maxCachedFileHandles: maxCachedFileHandles / workerCount)
     }
     self.tracker = try FileCompletionTracker(
       plannedFiles: plannedFiles

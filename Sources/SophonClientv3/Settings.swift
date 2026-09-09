@@ -16,13 +16,15 @@ public struct SophonClientSettings: Codable {
   public var maxCocurrentDownloads: Int
   public var maxCocurrentPostProcessors: Int
   public var maxCocurrentWrites: Int
+  public var maxCachedFileHandles: Int
 
   public init(
     baseURL: String, sophonBaseURL: String, maxRetries: Int = 10, retryInterval: Int = 5,
     launcherID: String, gameID: String, manifestCacheDir: String,
     logStdout: Bool = true, logFile: String? = nil, logLevel: Logger.Level = .info,
     maxCocurrentChecks: Int = 8, maxCocurrentDownloads: Int = 8,
-    maxCocurrentPostProcessors: Int = 4, maxCocurrentWrites: Int = 4
+    maxCocurrentPostProcessors: Int = 4, maxCocurrentWrites: Int = 4,
+    maxCachedFileHandles: Int = 512
   ) {
     self.baseURL = baseURL
     self.sophonBaseURL = sophonBaseURL
@@ -38,12 +40,14 @@ public struct SophonClientSettings: Codable {
     self.maxCocurrentDownloads = maxCocurrentDownloads
     self.maxCocurrentPostProcessors = maxCocurrentPostProcessors
     self.maxCocurrentWrites = maxCocurrentWrites
+    self.maxCachedFileHandles = maxCachedFileHandles
   }
 
   private enum CodingKeys: String, CodingKey {
     case baseURL, sophonBaseURL, maxRetries, retryInterval, launcherID, gameID, manifestCacheDir
     case logStdout, logFile, logLevel
     case maxCocurrentChecks, maxCocurrentDownloads, maxCocurrentPostProcessors, maxCocurrentWrites
+    case maxCachedFileHandles
   }
 
   public init(from decoder: any Decoder) throws {
@@ -71,5 +75,7 @@ public struct SophonClientSettings: Codable {
       ?? maxCocurrentPostProcessors
     maxCocurrentWrites =
       try container.decodeIfPresent(Int.self, forKey: .maxCocurrentWrites) ?? maxCocurrentWrites
+    maxCachedFileHandles =
+      try container.decodeIfPresent(Int.self, forKey: .maxCachedFileHandles) ?? maxCachedFileHandles
   }
 }

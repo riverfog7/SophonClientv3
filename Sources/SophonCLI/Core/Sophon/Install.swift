@@ -230,6 +230,7 @@ struct InstallCLI: AsyncParsableCommand, Sendable {
       // Finishing preserves buffered events, including the terminal event, for the consumer to drain.
       await reporter.unsubscribe(subscription.id)
       await consumer.value
+      await client.flushLogs()
       return outcome
     } catch {
       return error is CancellationError || Task.isCancelled

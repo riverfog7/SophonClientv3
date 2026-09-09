@@ -16,12 +16,13 @@ final class Installer: Sendable {
   let maxCocurrentDownloads: Int
   let maxCocurrentPostProcessors: Int
   let maxCocurrentWrites: Int
+  let maxCachedFileHandles: Int
 
   internal init(
     baseGameDir: URL, maxCocurrentChecks: Int, maxCocurrentDownloads: Int,
     maxCocurrentPostProcessors: Int, maxCocurrentWrites: Int, session: URLSession = .shared,
     maxRetries: Int = 10,
-    retryInterval: Int = 5
+    retryInterval: Int = 5, maxCachedFileHandles: Int = 512
   ) throws {
     self.baseGameDir = baseGameDir
     self.checker = ChunkCheckWorker(baseGameDir: self.baseGameDir)
@@ -33,6 +34,7 @@ final class Installer: Sendable {
     self.maxCocurrentDownloads = maxCocurrentDownloads
     self.maxCocurrentPostProcessors = maxCocurrentPostProcessors
     self.maxCocurrentWrites = maxCocurrentWrites
+    self.maxCachedFileHandles = maxCachedFileHandles
     guard maxCocurrentChecks > 0 else {
       throw SophonClientError.UnknownError("MaxCocurrentChecks should be a positive integer")
     }
@@ -45,6 +47,10 @@ final class Installer: Sendable {
     }
     guard maxCocurrentWrites > 0 else {
       throw SophonClientError.UnknownError("MaxCocurrentWrites should be a positive integer")
+    }
+    guard maxCachedFileHandles >= maxCocurrentWrites else {
+      throw SophonClientError.UnknownError(
+        "File handle cache budget must allow at least one handle per disk writer")
     }
   }
 
@@ -301,6 +307,7 @@ final class Installer: Sendable {
     let writeCoordinator = try ChunkWriteCoordinator(
       plannedFiles: plan.plannedFiles,
       workerCount: maxCocurrentWrites,
+      maxCachedFileHandles: maxCachedFileHandles,
       reporter: reporter
     )
 

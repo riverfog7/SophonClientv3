@@ -1,10 +1,21 @@
 import Foundation
 
 final class ChunkWriteWorker: @unchecked Sendable {
-  private let ioQueue: DispatchQueue
-  private var handles: [URL: FileHandle] = [:]
+  private struct CachedHandle {
+    let handle: FileHandle
+    var lastUsed: UInt64
+  }
 
-  init(index: Int) {
+  private let ioQueue: DispatchQueue
+  private let maxCachedFileHandles: Int
+  private var accessCounter: UInt64 = 0
+  private var handles: [URL: CachedHandle] = [:]
+
+  init(index: Int, maxCachedFileHandles: Int) throws {
+    guard maxCachedFileHandles > 0 else {
+      throw SophonClientError.UnknownError("File handle cache capacity must be positive")
+    }
+    self.maxCachedFileHandles = maxCachedFileHandles
     self.ioQueue = DispatchQueue(
       label: "sophon.chunk-write.\(index)",
       qos: .utility
@@ -29,8 +40,18 @@ final class ChunkWriteWorker: @unchecked Sendable {
   private func getHandle(
     for fileURL: URL
   ) throws -> FileHandle {
-    if let handle = handles[fileURL] {
-      return handle
+    accessCounter += 1
+    if var cached = handles[fileURL] {
+      cached.lastUsed = accessCounter
+      handles[fileURL] = cached
+      return cached.handle
+    }
+
+    if handles.count >= maxCachedFileHandles,
+      let oldest = handles.min(by: { $0.value.lastUsed < $1.value.lastUsed })
+    {
+      handles.removeValue(forKey: oldest.key)
+      try oldest.value.handle.close()
     }
 
     try FileManager.default.createDirectory(
@@ -53,7 +74,7 @@ final class ChunkWriteWorker: @unchecked Sendable {
 
     // can do both read and write
     let handle = try FileHandle(forUpdating: fileURL)
-    handles[fileURL] = handle
+    handles[fileURL] = CachedHandle(handle: handle, lastUsed: accessCounter)
     return handle
   }
 
@@ -66,8 +87,8 @@ final class ChunkWriteWorker: @unchecked Sendable {
       ioQueue.async { [self] in
         continuation.resume(
           with: Result {
-            if let handle = handles.removeValue(forKey: fileURL) {
-              try handle.close()
+            if let cached = handles.removeValue(forKey: fileURL) {
+              try cached.handle.close()
             }
           }
         )
@@ -78,8 +99,8 @@ final class ChunkWriteWorker: @unchecked Sendable {
   internal func closeAll() async {
     await withCheckedContinuation { continuation in
       ioQueue.async { [self] in
-        for handle in handles.values {
-          try? handle.close()
+        for cached in handles.values {
+          try? cached.handle.close()
         }
 
         handles.removeAll()
@@ -97,8 +118,8 @@ final class ChunkWriteWorker: @unchecked Sendable {
       try handle.seek(toOffset: application.offset)
       try handle.write(contentsOf: request.data)
     } catch {
-      if let handle = handles.removeValue(forKey: fileURL) {
-        try? handle.close()
+      if let cached = handles.removeValue(forKey: fileURL) {
+        try? cached.handle.close()
       }
       throw error
     }
