@@ -84,6 +84,13 @@ public final class HYPAPIClient: Sendable {
     throw lastError ?? APIClientError.InvalidHTTPResponse
   }
 
+  public func getGames(language: String = "en-us") async throws -> Games {
+    return try await _makeAPIRequest(
+      _getAPIGetURL(GET_GAMES_ROUTE).appending(queryItems: [
+        URLQueryItem(name: "language", value: language)
+      ]))
+  }
+
   public func getGameBranches() async throws -> GameBranches {
     return try await _makeAPIRequest(
       _getAPIGetURL(GET_GAME_BRANCHES_ROUTE))
