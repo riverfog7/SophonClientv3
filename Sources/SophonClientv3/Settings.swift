@@ -1,3 +1,5 @@
+import Logging
+
 public struct SophonClientSettings: Codable {
   public let baseURL: String
   public let sophonBaseURL: String
@@ -8,6 +10,7 @@ public struct SophonClientSettings: Codable {
   public let manifestCacheDir: String
   public var logStdout: Bool
   public var logFile: String?
+  public var logLevel: Logger.Level
 
   public var maxCocurrentChecks: Int
   public var maxCocurrentDownloads: Int
@@ -17,7 +20,7 @@ public struct SophonClientSettings: Codable {
   public init(
     baseURL: String, sophonBaseURL: String, maxRetries: Int = 10, retryInterval: Int = 5,
     launcherID: String, gameID: String, manifestCacheDir: String,
-    logStdout: Bool = true, logFile: String? = nil,
+    logStdout: Bool = true, logFile: String? = nil, logLevel: Logger.Level = .info,
     maxCocurrentChecks: Int = 8, maxCocurrentDownloads: Int = 8,
     maxCocurrentPostProcessors: Int = 4, maxCocurrentWrites: Int = 4
   ) {
@@ -30,6 +33,7 @@ public struct SophonClientSettings: Codable {
     self.manifestCacheDir = manifestCacheDir
     self.logStdout = logStdout
     self.logFile = logFile
+    self.logLevel = logLevel
     self.maxCocurrentChecks = maxCocurrentChecks
     self.maxCocurrentDownloads = maxCocurrentDownloads
     self.maxCocurrentPostProcessors = maxCocurrentPostProcessors
@@ -38,7 +42,7 @@ public struct SophonClientSettings: Codable {
 
   private enum CodingKeys: String, CodingKey {
     case baseURL, sophonBaseURL, maxRetries, retryInterval, launcherID, gameID, manifestCacheDir
-    case logStdout, logFile
+    case logStdout, logFile, logLevel
     case maxCocurrentChecks, maxCocurrentDownloads, maxCocurrentPostProcessors, maxCocurrentWrites
   }
 
@@ -55,6 +59,8 @@ public struct SophonClientSettings: Codable {
     retryInterval = try container.decodeIfPresent(Int.self, forKey: .retryInterval) ?? retryInterval
     logStdout = try container.decodeIfPresent(Bool.self, forKey: .logStdout) ?? logStdout
     logFile = try container.decodeIfPresent(String.self, forKey: .logFile)
+    logLevel =
+      try container.decodeIfPresent(Logger.Level.self, forKey: .logLevel) ?? logLevel
     maxCocurrentChecks =
       try container.decodeIfPresent(Int.self, forKey: .maxCocurrentChecks) ?? maxCocurrentChecks
     maxCocurrentDownloads =

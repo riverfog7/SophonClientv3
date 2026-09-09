@@ -26,21 +26,27 @@ public class SophonClientv3 {
     self.gameID = settings.gameID
     var puppy = Puppy()
     if settings.logStdout {
-      puppy.add(ConsoleLogger("SophonClientv3.stdout"))
+      puppy.add(
+        ConsoleLogger(
+          "SophonClientv3.stdout",
+          logFormat: SophonLogFormat(),
+        ))
     }
     if let path = settings.logFile {
       puppy.add(
         try FileLogger(
           "SophonClientv3.file",
-          fileURL: URL(fileURLWithPath: path).absoluteURL,
-          writeMode: .print))
+          logFormat: SophonLogFormat(),
+          fileURL:
+            URL(fileURLWithPath: path).absoluteURL, writeMode: .print),
+      )
     }
     self.logger = Logger(label: "SophonClientv3") { [puppy] label in
       guard !puppy.loggers.isEmpty else {
         return SwiftLogNoOpLogHandler()
       }
       var handler = PuppyLogHandler(label: label, puppy: puppy)
-      handler.logLevel = .info
+      handler.logLevel = settings.logLevel
       return handler
     }
     self.manifestManager = try await CachedManifestManager(
