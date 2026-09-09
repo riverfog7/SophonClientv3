@@ -107,6 +107,20 @@ public class SophonClientv3 {
     return codes
   }
 
+  private func writeInstalledVoicePacks(_ additional: Set<String>) throws {
+    guard !additional.isEmpty, !gameLaunchConfig.audioPkgScanDir.isEmpty else { return }
+    let languages = try getInstalledVoicePacks().union(additional).sorted().map { code in
+      guard let name = AUDIO_LANG_TO_CODE.first(where: { $0.value == code })?.key else {
+        throw SophonClientError.UnknownVoicePackError(code)
+      }
+      return name
+    }
+    let file = baseGameDir.appendingPathComponent(gameLaunchConfig.audioPkgScanDir)
+    try FileManager.default.createDirectory(
+      at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try (languages.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+  }
+
   private func decodeResCategory() throws -> Set<ResCategory> {
     if gameLaunchConfig.resCategoryDir.isEmpty { return [] }
     let resCategoryDir = baseGameDir.appendingPathComponent(gameLaunchConfig.resCategoryDir)
@@ -233,6 +247,8 @@ public class SophonClientv3 {
 
         installInfos.append(info)
       }
+      try Task.checkCancellation()
+      try writeInstalledVoicePacks(additionalVoicePackMatchingFields)
     } catch {
       if error is CancellationError || Task.isCancelled {
         await reporter.record(.finished(.cancelled))
