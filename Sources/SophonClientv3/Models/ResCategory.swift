@@ -1,5 +1,5 @@
 internal struct ResCategory: Codable, Hashable {
-  var category: String  // this is category ID
+  var category: String
   var isDelete: Bool
 
   enum CodingKeys: String, CodingKey {

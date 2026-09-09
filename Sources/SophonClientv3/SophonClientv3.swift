@@ -154,7 +154,7 @@ public class SophonClientv3 {
     return items
   }
 
-  private func getRemovedCategoryIDs() async throws -> Set<String> {
+  private func getRemovedMatchingFields() async throws -> Set<String> {
     var items: Set<String> = []
     for category in try decodeResCategory() {
       if category.isDelete {
@@ -182,10 +182,10 @@ public class SophonClientv3 {
     )
 
     // compute which resource category to install
-    let deleted = try await getRemovedCategoryIDs()
+    let deleted = try await getRemovedMatchingFields()
     var resourceMatchingFields: Set<String> = []
     for branchCategory in resources {
-      if !deleted.contains(branchCategory.categoryID) {
+      if !deleted.contains(branchCategory.matchingField) {
         resourceMatchingFields.insert(branchCategory.matchingField)
       }
     }
