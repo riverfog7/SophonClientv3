@@ -85,14 +85,17 @@ public class SophonClientv3 {
 
     let decoder = JSONDecoder()
     var items: Set<ResCategory> = []
+    var ids: Set<String> = []
     for try await line in resCategoryDir.lines {
       let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !trimmedLine.isEmpty else { continue }
 
       if let data = trimmedLine.data(using: .utf8) {
         let item = try decoder.decode(ResCategory.self, from: data)
-        guard !items.contains(item) else {
-          throw SophonClientError.UnknownError("Same game category is deleted twice")
+        guard ids.insert(item.category).inserted else {
+          throw SophonClientError.UnknownError(
+            "Duplicate resource category: \(item.category)"
+          )
         }
         items.insert(item)
       }
