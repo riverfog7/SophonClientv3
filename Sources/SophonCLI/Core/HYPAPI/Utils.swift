@@ -64,3 +64,16 @@ internal final class HYPAPIClientManager: Sendable {
     return isCN ? cnClient : osClient
   }
 }
+
+func resolveHYPGame(_ query: String, in configs: GameConfigs) throws -> GameLaunchConfig {
+  if let exact = configs.findBy(id: query) { return exact }
+  let matches = configs.launchConfigs.filter { $0.game.biz == query }
+  guard let first = matches.first else {
+    throw ValidationError("No game matches ID or biz '\(query)'.")
+  }
+  guard matches.count == 1 else {
+    let ids = matches.map(\.game.id).sorted().joined(separator: ", ")
+    throw ValidationError("Game biz '\(query)' is ambiguous. Specify an ID: \(ids)")
+  }
+  return first
+}
