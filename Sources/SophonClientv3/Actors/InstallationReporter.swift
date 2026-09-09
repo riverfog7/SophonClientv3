@@ -51,7 +51,8 @@ public actor InstallationReporter: OperationReporting {
 
     switch event {
     case .metadataPlanned(let totalManifests):
-      logger.info("Installation metadata planned", metadata: ["manifests.total": "\(totalManifests)"])
+      logger.info(
+        "Installation metadata planned", metadata: ["manifests.total": "\(totalManifests)"])
 
     case .manifestPulled(let matchingField, let predownload):
       logger.info(
