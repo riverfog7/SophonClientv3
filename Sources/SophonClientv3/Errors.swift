@@ -15,6 +15,7 @@ enum SophonClientError: Error {
   case InvalidChecksumError(expected: String, actual: String)
   case DuplicateFileError(_ fileName: String)
   case UnknownVoicePackError(_ matchingField: String)
+  case GameScenarioUnsupportedError(gameID: String, gameBiz: String)
 }
 
 extension SophonClientError: LocalizedError {
@@ -48,6 +49,9 @@ extension SophonClientError: LocalizedError {
       return "Duplicate file: \(fileName)"
     case .UnknownVoicePackError(let matchingField):
       return "Unknown voice pack: \(matchingField)"
+    case .GameScenarioUnsupportedError(let gameID, let gameBiz):
+      return
+        "Partial download (full/base install) not supported for gameID: \(gameID), gameBiz: \(gameBiz)"
     }
   }
 }

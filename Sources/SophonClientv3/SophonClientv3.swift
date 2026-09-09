@@ -8,7 +8,9 @@ import Puppy
 #endif
 
 public class SophonClientv3 {
+  private let baseGameDir: URL
   private let gameID: String
+  private let gameBiz: String
   private let logger: Logger
   private let installer: Installer
   internal let manifestManager: CachedManifestManager
@@ -20,6 +22,7 @@ public class SophonClientv3 {
   )
     async throws
   {
+    self.baseGameDir = baseGameDir
     self.gameID = settings.gameID
     var puppy = Puppy()
     if settings.logStdout {
@@ -52,6 +55,7 @@ public class SophonClientv3 {
       maxCocurrentWrites: settings.maxCocurrentWrites, maxRetries: settings.maxRetries,
       retryInterval: settings.retryInterval)
     self.gameLaunchConfig = manifestManager.getGameLaunchConfig()
+    self.gameBiz = gameLaunchConfig.game.biz
   }
 
   public func makeInstallationReporter(id: String = UUID().uuidString) -> InstallationReporter {
@@ -66,6 +70,96 @@ public class SophonClientv3 {
     // TODO: detect installed voice packs from the game directory instead of returning an empty set
     let _ = manifestManager.getGameLaunchConfig()
     return Set<String>()
+  }
+
+  private func decodeResCategory() async throws -> Set<ResCategory> {
+    if gameLaunchConfig.resCategoryDir.isEmpty { return [] }
+    let resCategoryDir = baseGameDir.appendingPathComponent(gameLaunchConfig.resCategoryDir)
+    var isDirectory: ObjCBool = false
+    guard
+      FileManager.default.fileExists(atPath: resCategoryDir.path(), isDirectory: &isDirectory)
+        && !isDirectory.boolValue
+    else {
+      return []
+    }
+
+    let decoder = JSONDecoder()
+    var items: Set<ResCategory> = []
+    for try await line in resCategoryDir.lines {
+      let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmedLine.isEmpty else { continue }
+
+      if let data = trimmedLine.data(using: .utf8) {
+        let item = try decoder.decode(ResCategory.self, from: data)
+        guard !items.contains(item) else {
+          throw SophonClientError.UnknownError("Same game category is deleted twice")
+        }
+        items.insert(item)
+      }
+    }
+    return items
+  }
+
+  private func getRemovedCategoryIDs() async throws -> Set<String> {
+    var items: Set<String> = []
+    for category in try await decodeResCategory() {
+      if category.isDelete {
+        items.insert(category.category)
+      }
+    }
+    return items
+  }
+
+  private func getRequiredMatchingFields(
+    mode: GameBranchCategoryScenario, additionalVoicePackMatchingFields: Set<String> = [],
+    predownload: Bool = false
+  ) async throws -> Set<String> {
+    let packageScenarioSupported = gameLaunchConfig.enableScenarioPkg
+    if !packageScenarioSupported && mode != .full {
+      throw SophonClientError.GameScenarioUnsupportedError(gameID: gameID, gameBiz: gameBiz)
+    }
+
+    let branch = try manifestManager.getGameSubbranch(
+      predownload: predownload
+    )
+    let resources = branch.getGameBranchCategories(
+      categoryScenario: mode,
+      categoryType: .resource
+    )
+
+    // compute which resource category to install
+    let deleted = try await getRemovedCategoryIDs()
+    var resourceMatchingFields: Set<String> = []
+    for branchCategory in resources {
+      if !deleted.contains(branchCategory.categoryID) {
+        resourceMatchingFields.insert(branchCategory.matchingField)
+      }
+    }
+    guard !resourceMatchingFields.isEmpty else {
+      throw SophonClientError.UnknownError(
+        "No resource manifests are available for the requested installation mode."
+      )
+    }
+
+    // compute which voice packs to install
+    let availableVoicePacks = Set(
+      branch.categories
+        .filter { $0.type == .audio }
+        .map(\.matchingField)
+    )
+    let voicePackMatchingFields = try getInstalledVoicePacks().union(
+      additionalVoicePackMatchingFields)
+    for matchingField in voicePackMatchingFields {
+      guard availableVoicePacks.contains(matchingField) else {
+        throw SophonClientError.UnknownVoicePackError(matchingField)
+      }
+    }
+
+    guard resourceMatchingFields.intersection(voicePackMatchingFields).isEmpty else {
+      throw SophonClientError.UnknownError(
+        "voice pack matching field overlaps with resource matching fields")
+    }
+    return resourceMatchingFields.union(voicePackMatchingFields)
   }
 
   public func install(
@@ -83,36 +177,9 @@ public class SophonClientv3 {
       try Task.checkCancellation()
       await reporter.record(.phaseChanged(.metadata))
 
-      let branch = try manifestManager.getGameSubbranch(
-        predownload: predownload
-      )
-      let resources = branch.getGameBranchCategories(
-        categoryScenario: mode,
-        categoryType: .resource
-      )
-      guard !resources.isEmpty else {
-        throw SophonClientError.UnknownError(
-          "No resource manifests are available for the requested installation mode."
-        )
-      }
-
-      let availableVoicePacks = Set(
-        branch.categories
-          .filter { $0.type == .audio }
-          .map(\.matchingField)
-      )
-      let voicePackMatchingFields = try getInstalledVoicePacks().union(
-        additionalVoicePackMatchingFields)
-      for matchingField in voicePackMatchingFields {
-        guard availableVoicePacks.contains(matchingField) else {
-          throw SophonClientError.UnknownVoicePackError(matchingField)
-        }
-      }
-
-      var seen = Set<String>()
-      let matchingFields = (resources.map(\.matchingField) + voicePackMatchingFields).filter {
-        seen.insert($0).inserted
-      }
+      let matchingFields = try await getRequiredMatchingFields(
+        mode: mode, additionalVoicePackMatchingFields: additionalVoicePackMatchingFields,
+        predownload: predownload)
 
       await reporter.record(.metadataPlanned(totalManifests: matchingFields.count))
       for matchingField in matchingFields {
