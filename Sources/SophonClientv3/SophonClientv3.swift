@@ -77,7 +77,7 @@ public class SophonClientv3 {
     let resCategoryDir = baseGameDir.appendingPathComponent(gameLaunchConfig.resCategoryDir)
     var isDirectory: ObjCBool = false
     guard
-      FileManager.default.fileExists(atPath: resCategoryDir.path(), isDirectory: &isDirectory)
+      FileManager.default.fileExists(atPath: resCategoryDir.path, isDirectory: &isDirectory)
         && !isDirectory.boolValue
     else {
       return []
@@ -86,7 +86,9 @@ public class SophonClientv3 {
     let decoder = JSONDecoder()
     var items: Set<ResCategory> = []
     var ids: Set<String> = []
-    for try await line in resCategoryDir.lines {
+
+    let contents = try String(contentsOf: resCategoryDir, encoding: .utf8)
+    for line in contents.split(whereSeparator: \.isNewline) {
       let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !trimmedLine.isEmpty else { continue }
 
