@@ -118,7 +118,8 @@ public class SophonClientv3 {
     let file = baseGameDir.appendingPathComponent(gameLaunchConfig.audioPkgScanDir)
     try FileManager.default.createDirectory(
       at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try (languages.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+    try (languages.joined(separator: "\n") + "\n").write(
+      to: file, atomically: true, encoding: .utf8)
   }
 
   private func decodeResCategory() throws -> Set<ResCategory> {
