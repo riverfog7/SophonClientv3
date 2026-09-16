@@ -68,7 +68,7 @@ final class Installer: Sendable {
 
   internal func scan(
     installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
-    reporter: (any OperationReporting<InstallationEvent>)? = nil
+    reporter: InstallationReporter? = nil
   )
     async throws
     -> InstallationPlan
@@ -236,7 +236,7 @@ final class Installer: Sendable {
 
   internal func install(
     installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
-    reporter: (any OperationReporting<InstallationEvent>)? = nil
+    reporter: InstallationReporter? = nil
   )
     async throws
   {
@@ -262,7 +262,7 @@ final class Installer: Sendable {
 
   private func trimFiles(
     plan: InstallationPlan,
-    reporter: (any OperationReporting<InstallationEvent>)?
+    reporter: InstallationReporter? = nil
   ) async throws {
     for file in plan.trimFiles {
       try Task.checkCancellation()
@@ -297,7 +297,7 @@ final class Installer: Sendable {
 
   internal func execute(
     _ plan: InstallationPlan,
-    reporter: (any OperationReporting<InstallationEvent>)? = nil
+    reporter: InstallationReporter? = nil
   ) async throws {
     await reporter?.record(.phaseChanged(.running))
     let requiredChunks = AsyncChannel<RequiredChunk>()
@@ -380,7 +380,7 @@ final class Installer: Sendable {
 
   private func download(
     _ chunk: RequiredChunk,
-    reporter: (any OperationReporting<InstallationEvent>)?
+    reporter: InstallationReporter?
   ) async throws -> DownloadedChunk {
     guard !chunk.downloadInfo.encryption,
       chunk.downloadInfo.password.isEmpty

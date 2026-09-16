@@ -220,11 +220,11 @@ public class SophonClientv3 {
   public func install(
     mode: GameBranchCategoryScenario, additionalVoicePackMatchingFields: Set<String> = [],
     predownload: Bool = false,
-    reporter: (any OperationReporting<InstallationEvent>)? = nil
+    reporter: InstallationReporter? = nil
   ) async throws {
     // if reporter is not provided, create a new InstallationReporter instance
     // logging will not work if reporter does not exist
-    let reporter: any OperationReporting<InstallationEvent> =
+    let reporter: InstallationReporter =
       reporter ?? makeInstallationReporter()
 
     var installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)] = []

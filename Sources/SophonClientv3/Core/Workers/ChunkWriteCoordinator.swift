@@ -4,13 +4,13 @@ import Foundation
 final class ChunkWriteCoordinator: Sendable {
   private let workers: [ChunkWriteWorker]
   private let tracker: FileCompletionTracker
-  private let reporter: (any OperationReporting<InstallationEvent>)?
+  private let reporter: InstallationReporter?
 
   init(
     plannedFiles: [PlannedFile],
     workerCount: Int,
     maxCachedFileHandles: Int = 512,
-    reporter: (any OperationReporting<InstallationEvent>)? = nil
+    reporter: InstallationReporter? = nil
   ) throws {
     guard workerCount > 0 else {
       throw SophonClientError.UnknownError(

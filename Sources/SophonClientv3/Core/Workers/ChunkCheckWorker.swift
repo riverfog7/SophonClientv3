@@ -16,7 +16,7 @@ final class ChunkCheckWorker: Sendable {
 
   internal func run(
     _ fileInfo: FileInfo,
-    reporter: (any OperationReporting<InstallationEvent>)? = nil
+    reporter: InstallationReporter? = nil
   ) async throws -> GameFileState {
     try Task.checkCancellation()
 

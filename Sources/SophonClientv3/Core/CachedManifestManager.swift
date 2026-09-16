@@ -167,7 +167,7 @@ class CachedManifestManager {
 
   internal func getSophonManifest(
     matchingField: String, predownload: Bool = false,
-    reporter: (any OperationReporting<InstallationEvent>)? = nil
+    reporter: InstallationReporter? = nil
   ) async throws
     -> (Manifest, SophonDownloadInfo)
   {

@@ -35,7 +35,7 @@ struct DownloadWorker: Sendable {
 
   internal func run(
     _ downloadRequest: DownloadRequest,
-    reporter: (any OperationReporting<InstallationEvent>)? = nil
+    reporter: InstallationReporter? = nil
   ) async throws -> Data {
     var lastError: Error?
 
