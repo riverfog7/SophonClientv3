@@ -1,47 +1,16 @@
 import Foundation
 import Logging
 
-public actor InstallationReporter: OperationReporting {
-  private let logger: Logger
-  private var progress = InstallationProgress()
+public actor InstallationReporter: OperationReportingInternal {
+  public typealias Event = InstallationEvent
+  public typealias Progress = InstallationProgress
 
-  private var subscribers: [UUID: AsyncStream<InstallationEvent>.Continuation] = [:]
+  internal let logger: Logger
+  internal var progress = InstallationProgress()
+  internal var subscribers: [UUID: AsyncStream<InstallationEvent>.Continuation] = [:]
 
-  init(logger: Logger) {
+  public init(logger: Logger) {
     self.logger = logger
-  }
-
-  public func snapshot() -> InstallationProgress {
-    progress
-  }
-
-  public func subscribe() -> (
-    id: UUID,
-    progress: InstallationProgress,
-    events: AsyncStream<InstallationEvent>
-  ) {
-    let id = UUID()
-    let pair = AsyncStream<InstallationEvent>.makeStream(
-      bufferingPolicy: .unbounded
-    )
-
-    if progress.outcome == nil {
-      pair.continuation.onTermination = { [weak self] _ in
-        Task {
-          await self?.unsubscribe(id)
-        }
-      }
-
-      subscribers[id] = pair.continuation
-    } else {
-      pair.continuation.finish()
-    }
-
-    return (id, progress, pair.stream)
-  }
-
-  public func unsubscribe(_ id: UUID) {
-    subscribers.removeValue(forKey: id)?.finish()
   }
 
   public func record(_ event: InstallationEvent) {

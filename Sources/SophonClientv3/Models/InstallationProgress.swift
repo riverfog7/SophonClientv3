@@ -46,7 +46,7 @@ public enum InstallationEvent: Sendable {
   case finished(InstallationOutcome)
 }
 
-public struct InstallationProgress: Sendable {
+public struct InstallationProgress: BaseProgress {
   public internal(set) var phase: InstallationPhase = .metadata
   public internal(set) var totalDownloadBytes: UInt64?
   public internal(set) var totalWriteBytes: UInt64?
