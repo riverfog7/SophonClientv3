@@ -69,13 +69,16 @@ final class ChunkCheckWorker: Sendable {
     // seeking to greater offset than file size is permitted
     // it will just return nil as data
     try handle.seek(toOffset: chunkInfo.offset)
-    let data = try handle.read(upToCount: size) ?? Data()
-    let matches = data.count == size && md5Hex(data) == chunkInfo.md5
-    onEvent(
-      .fileChunkScanned(
-        filePath: filePath, chunkID: chunkInfo.chunkID, isBroken: !matches,
-        offset: chunkInfo.offset, bytes: UInt64(data.count),
-        expectedBytes: UInt64(chunkInfo.uncompressedSize)))
+    var matches: Bool = false
+    try autoreleasepool {
+      let data = try handle.read(upToCount: size) ?? Data()
+      matches = data.count == size && md5Hex(data) == chunkInfo.md5
+      onEvent(
+        .fileChunkScanned(
+          filePath: filePath, chunkID: chunkInfo.chunkID, isBroken: !matches,
+          offset: chunkInfo.offset, bytes: UInt64(data.count),
+          expectedBytes: UInt64(chunkInfo.uncompressedSize)))
+    }
 
     return matches
   }
