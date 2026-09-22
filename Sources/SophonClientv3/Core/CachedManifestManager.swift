@@ -6,7 +6,7 @@ import SwiftProtobuf
   import FoundationNetworking
 #endif
 
-class CachedManifestManager {
+final class CachedManifestManager: Sendable {
   private let gameID: String
   internal let apiClient: HYPAPIClient
   private let manifestCacheDir: URL

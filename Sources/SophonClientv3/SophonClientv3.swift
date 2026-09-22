@@ -237,17 +237,28 @@ public class SophonClientv3 {
         predownload: predownload)
 
       await reporter.record(.metadataPlanned(totalManifests: matchingFields.count))
-      for matchingField in matchingFields {
-        try Task.checkCancellation()
+      let manager = self.manifestManager
+      installInfos = try await withThrowingTaskGroup(of: (Manifest, SophonDownloadInfo).self) {
+        group in
+        for matchingField in matchingFields {
+          group.addTask {
+            try Task.checkCancellation()
 
-        let info = try await manifestManager.getSophonManifest(
-          matchingField: matchingField,
-          predownload: predownload,
-          reporter: reporter
-        )
+            return try await manager.getSophonManifest(
+              matchingField: matchingField,
+              predownload: predownload,
+              reporter: reporter
+            )
+          }
+        }
 
-        installInfos.append(info)
+        var results = [(Manifest, SophonDownloadInfo)]()
+        for try await result in group {
+          results.append(result)
+        }
+        return results
       }
+
       try Task.checkCancellation()
       try writeInstalledVoicePacks(additionalVoicePackMatchingFields)
     } catch {
