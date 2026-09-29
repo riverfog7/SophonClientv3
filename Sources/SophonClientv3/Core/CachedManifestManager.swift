@@ -95,14 +95,16 @@ final class CachedManifestManager: Sendable {
     try data.write(to: targetPath)
   }
 
-  internal func _getManifest(manifestInfo: SophonManifestInfo) async throws -> Manifest {
-    let url = try manifestInfo.getManifestDownloadURL()
-    let md5Target = manifestInfo.manifest.checksum
-    let isCompressed = manifestInfo.manifestDownload.compression
-    let isEncrypted = manifestInfo.manifestDownload.encryption
-    let password = manifestInfo.manifestDownload.password
-    let compressedSize = UInt64(manifestInfo.manifest.compressedSize)
-    let uncompressedSize = UInt64(manifestInfo.manifest.uncompressedSize)
+  private func _getManifest<Message: SwiftProtobuf.Message>(
+    manifest: SophonManifestProperty, downloadInfo: SophonDownloadInfo
+  ) async throws -> Message {
+    let url = try downloadInfo.buildDownloadURL(manifest.id)
+    let md5Target = manifest.checksum
+    let isCompressed = downloadInfo.compression
+    let isEncrypted = downloadInfo.encryption
+    let password = downloadInfo.password
+    let compressedSize = UInt64(manifest.compressedSize)
+    let uncompressedSize = UInt64(manifest.uncompressedSize)
 
     guard let cachedData = try checkCache(key: md5Target) else {
       var request = URLRequest(url: url)
@@ -147,7 +149,7 @@ final class CachedManifestManager: Sendable {
           }
 
           try writeCache(key: md5Target, data: data)
-          return try Manifest(serializedBytes: data)
+          return try Message(serializedBytes: data)
         } catch {
           lastError = error
 
@@ -162,7 +164,7 @@ final class CachedManifestManager: Sendable {
           "Downloading manifest failed with an error but there is no error")
     }
 
-    return try Manifest(serializedBytes: cachedData)
+    return try Message(serializedBytes: cachedData)
   }
 
   internal func getSophonManifest(
@@ -179,8 +181,24 @@ final class CachedManifestManager: Sendable {
       throw SophonClientError.InvalidManifestMatchingFieldError(matchingField)
     }
 
-    let manifest = try await _getManifest(manifestInfo: sophonManifestInfo)
+    let manifest: Manifest = try await _getManifest(
+      manifest: sophonManifestInfo.manifest, downloadInfo: sophonManifestInfo.manifestDownload)
     await reporter?.record(.manifestPulled(matchingField: matchingField, predownload: predownload))
     return (manifest, sophonManifestInfo.chunkDownload)
+  }
+
+  internal func getSophonPatchManifest(
+    matchingField: String, predownload: Bool = false
+  ) async throws -> (DiffManifest, SophonDownloadInfo) {
+    let sophonPatchBuildInfo = try await apiClient.getSophonPatchBuildInfo(
+      getGameSubbranch(predownload: predownload))
+    guard let sophonPatchManifestInfo = sophonPatchBuildInfo.find(matchingField) else {
+      throw SophonClientError.InvalidManifestMatchingFieldError(matchingField)
+    }
+
+    let manifest: DiffManifest = try await _getManifest(
+      manifest: sophonPatchManifestInfo.manifest,
+      downloadInfo: sophonPatchManifestInfo.manifestDownload)
+    return (manifest, sophonPatchManifestInfo.diffDownload)
   }
 }
