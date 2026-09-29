@@ -70,7 +70,17 @@ final class ChunkCheckWorker: Sendable {
     // it will just return nil as data
     try handle.seek(toOffset: chunkInfo.offset)
     var matches: Bool = false
-    try autoreleasepool {
+    #if canImport(ObjectiveC)
+      try autoreleasepool {
+        let data = try handle.read(upToCount: size) ?? Data()
+        matches = data.count == size && md5Hex(data) == chunkInfo.md5
+        onEvent(
+          .fileChunkScanned(
+            filePath: filePath, chunkID: chunkInfo.chunkID, isBroken: !matches,
+            offset: chunkInfo.offset, bytes: UInt64(data.count),
+            expectedBytes: UInt64(chunkInfo.uncompressedSize)))
+      }
+    #else
       let data = try handle.read(upToCount: size) ?? Data()
       matches = data.count == size && md5Hex(data) == chunkInfo.md5
       onEvent(
@@ -78,7 +88,7 @@ final class ChunkCheckWorker: Sendable {
           filePath: filePath, chunkID: chunkInfo.chunkID, isBroken: !matches,
           offset: chunkInfo.offset, bytes: UInt64(data.count),
           expectedBytes: UInt64(chunkInfo.uncompressedSize)))
-    }
+    #endif
 
     return matches
   }
