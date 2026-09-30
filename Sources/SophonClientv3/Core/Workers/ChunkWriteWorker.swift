@@ -1,6 +1,7 @@
 import Foundation
 
 final class ChunkWriteWorker: @unchecked Sendable {
+// TODO: maybe refactor for truly sequential reads
   private struct CachedHandle {
     let handle: FileHandle
     var lastUsed: UInt64
