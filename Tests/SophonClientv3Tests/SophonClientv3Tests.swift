@@ -314,9 +314,9 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
     baseGameDir: root, maxCocurrentChecks: 1, maxCocurrentDownloads: 2,
     maxCocurrentPostProcessors: 2,
     maxCocurrentWrites: 1, downloadCache: cache)
-  try await updater.predownload(
-    plan, settings: settings, downloadCache: cache,
-    reporter: UpdateReporter(logger: .init(label: "test")))
+  try await updater.execute(
+    plan, settings: settings, downloadCache: cache, installer: installer,
+    reporter: UpdateReporter(logger: .init(label: "test")), cacheOnly: true)
   #expect(try Data(contentsOf: target.fileURL) == fixture.old)
   #expect(FileManager.default.fileExists(atPath: deletion.fileURL.path))
   #expect(bundleFixture.ranges.count == 1)
@@ -332,6 +332,16 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   // Only the updated target falls back to installation when its source is broken.
   try Data(repeating: 0x00, count: fixture.old.count).write(to: target.fileURL)
   try Data("gone".utf8).write(to: deletion.fileURL)
+  let cachedRepair = UpdateReporter(logger: .init(label: "test"))
+  try await updater.execute(
+    plan, settings: settings, downloadCache: cache, installer: installer, reporter: cachedRepair,
+    cacheOnly: true)
+  #expect(try Data(contentsOf: target.fileURL) == Data(repeating: 0x00, count: fixture.old.count))
+  #expect(FileManager.default.fileExists(atPath: deletion.fileURL.path))
+  let cacheState = try #require(
+    try await SophonClientv3.savedUpdateState(at: root, settings: settings))
+  #expect(cacheState.cacheOnly)
+  #expect(cacheState.files[target.fileURL.path] == (rawPayload ? .cachedPatch : .cachedRepair))
   let repaired = UpdateReporter(logger: .init(label: "test"))
   try await updater.execute(
     plan, settings: settings, downloadCache: cache, installer: installer, reporter: repaired)
@@ -474,6 +484,103 @@ func testTransferInstallationCheckpoints() async throws {
     try await SophonClientv3.savedInstallationState(at: root, settings: settings))
   #expect(completed.remainingPlan().requiredChunks.isEmpty)
   #expect(completed.finished)
+}
+
+@Test
+func testTransferVersionAndActionDecision() throws {
+  func branch(_ version: String, from: [String]) throws -> GameSubBranch {
+    try JSONDecoder().decode(
+      GameSubBranch.self,
+      from: JSONSerialization.data(withJSONObject: [
+        "package_id": "fixture", "branch": "fixture", "password": "", "tag": version,
+        "diff_tags": from, "categories": [],
+      ]))
+  }
+  let records = try JSONDecoder().decode(
+    GameScanInfos.self,
+    from: JSONSerialization.data(withJSONObject: [
+      "game_scan_info": [
+        [
+          "game_id": "fixture",
+          "game_exe_list": [
+            ["version": "1", "md5": "shared"], ["version": "2", "md5": "shared"],
+            ["version": "3", "md5": "new"],
+          ],
+        ],
+        ["game_id": "other", "game_exe_list": [["version": "wrong-game", "md5": "new"]]],
+      ]
+    ]))
+  #expect(
+    resolveInstalledVersion(md5: "NEW", gameID: "fixture", records: records, completedVersion: nil)
+      .version == "3")
+  #expect(
+    resolveInstalledVersion(
+      md5: "shared", gameID: "fixture", records: records, completedVersion: nil
+    ).version == nil)
+  #expect(
+    resolveInstalledVersion(
+      md5: "shared", gameID: "fixture", records: records, completedVersion: "2"
+    ).version == "2")
+  let live = try branch("2", from: ["1"])
+  let future = try branch("3", from: ["2"])
+  let older = InstalledVersion(version: "1", executableMD5: nil, candidates: ["1"])
+  let current = InstalledVersion(version: "2", executableMD5: nil, candidates: ["2"])
+  let ahead = InstalledVersion(version: "3", executableMD5: nil, candidates: ["3"])
+  #expect(
+    decideGameAction(
+      installed: older, live: live, future: future, installation: nil, update: nil,
+      futureCached: false
+    ).action == .update)
+  #expect(
+    decideGameAction(
+      installed: current, live: live, future: future, installation: nil, update: nil,
+      futureCached: false
+    ).action == .cacheUpdate)
+  #expect(
+    decideGameAction(
+      installed: current, live: live, future: future, installation: nil, update: nil,
+      futureCached: true
+    ).action == .none)
+  #expect(
+    decideGameAction(
+      installed: ahead, live: live, future: future, installation: nil, update: nil,
+      futureCached: false
+    ).action == .none)
+  let plan = UpdatePlan(
+    sourceVersion: "1", targetVersion: "2", patchBundles: [], installFiles: [], deleteFiles: [])
+  let writing = SavedUpdateState(
+    gameID: "fixture", mode: .full, predownload: false, cacheOnly: false, plan: plan, files: [:],
+    finished: false)
+  // A partially updated executable cannot hide unfinished file work.
+  #expect(
+    decideGameAction(
+      installed: current, live: live, future: future, installation: nil, update: writing,
+      futureCached: false
+    ).action == .resumeUpdate)
+  let liveCache = SavedUpdateState(
+    gameID: "fixture", mode: .full, predownload: false, cacheOnly: true, plan: plan, files: [:],
+    finished: false)
+  let resumeCache = decideGameAction(
+    installed: older, live: live, future: future, installation: nil, update: liveCache,
+    futureCached: false)
+  #expect(resumeCache.action == .resumeUpdate)
+  #expect(resumeCache.cacheOnly)
+  let obsolete = try branch("3", from: ["2"])
+  #expect(
+    decideGameAction(
+      installed: current, live: obsolete, future: nil, installation: nil, update: writing,
+      futureCached: false
+    ).action == .install)
+  let cachePlan = UpdatePlan(
+    sourceVersion: "2", targetVersion: "3", patchBundles: [], installFiles: [], deleteFiles: [])
+  let caching = SavedUpdateState(
+    gameID: "fixture", mode: .full, predownload: true, cacheOnly: true, plan: cachePlan, files: [:],
+    finished: false)
+  #expect(
+    decideGameAction(
+      installed: current, live: live, future: future, installation: nil, update: caching,
+      futureCached: false
+    ).cacheOnly)
 }
 
 private final class TransferRPCProcess: @unchecked Sendable {

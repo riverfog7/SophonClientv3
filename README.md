@@ -5,13 +5,14 @@ Swift 6.3 library and CLI for Sophon installation, incremental updates, and pred
 ```sh
 swift build
 .build/debug/SophonCLI --help
-.build/debug/SophonCLI update GAME /games/GAME --from SOURCE_VERSION
-.build/debug/SophonCLI predownload GAME /games/GAME --from SOURCE_VERSION
+.build/debug/SophonCLI update GAME /games/GAME
+.build/debug/SophonCLI update GAME /games/GAME --predownload --cache-only
+.build/debug/SophonCLI next-action GAME /games/GAME
 .build/debug/SophonCLI state /games/GAME
 .build/debug/SophonCLI state /games/GAME --operation install
 ```
 
-`GAME` accepts an API game ID or biz. `--cn` selects CN endpoints; `--mode base` selects the base installation scenario. Predownload selects the future branch; add `--live` to cache a live update. `update --plan` prints the static manifest plan without modifying game files.
+`GAME` accepts an API game ID or biz. `--cn` selects CN endpoints; `--mode base` selects the base installation scenario. `update --predownload` selects the future branch; `--cache-only` runs source checks and caches bundles/repair chunks while skipping target writes and deletions. The default source version is detected from the configured executable MD5 and API version records; `--from` overrides it. `update --plan` prints the static manifest plan without modifying game files.
 
 ## Cache and recovery
 
@@ -25,7 +26,7 @@ Completion receipts assume game files have not changed outside the operation. Us
 
 The default `--write-mode temporary` keeps the existing target until output verification succeeds. Replacement uses a recoverable rename and backup. `--write-mode in-place` preserves the original on the cache drive before overwriting the target. An interrupted active patch restarts from that original; completed files and received download bytes are retained. This is process-exit recovery, not a guarantee against power loss. Keep the cache and state directories until an unfinished update has completed, and resume with the same `--from` version and directories.
 
-Useful options on `install`, `update`, and `predownload`:
+Useful options on `install` and `update`:
 
 | Option | Default | Purpose |
 | --- | --- | --- |
@@ -55,9 +56,9 @@ Start `.build/debug/SophonCLI rpc` for newline-delimited JSON-RPC 2.0 on stdin/s
 {"jsonrpc":"2.0","id":4,"method":"operation.cancel","params":{"operationID":"ID_FROM_START"}}
 ```
 
-`install.start`, `update.start`, and `update.predownload` return an operation ID immediately. Stdio emits `operation.progress` and `operation.finished` notifications. `operation.wait` waits for the final status; cancellation remains available while it waits. Status for the most recent 128 completed operations is kept in the process. `state.inspect` needs only `directory`, optional `transfer`, and optional `operation` (`update` by default or `install`); it reads persisted state without contacting the API.
+`install.start` and `update.start` return an operation ID immediately. Stdio emits `operation.progress` and `operation.finished` notifications. `operation.wait` waits for the final status; cancellation remains available while it waits. Status for the most recent 128 completed operations is kept in the process. `state.inspect` needs only `directory`, optional `transfer`, and optional `operation` (`update` by default or `install`); it reads persisted state without contacting the API.
 
-Operation parameters: `game`, `directory`, optional `cn`, `mode` (`full`/`base`), `voicePacks` and `predownload` (installation), `downloads` (8), `writes` (4), and `transfer`. Updates also need `sourceVersion`. `update.predownload` uses `futureBranch: true` by default; `update.plan` uses the live branch unless `futureBranch: true` is supplied. Transfer fields use bytes for `memoryLimit` and `diskLimit`, an `entryLimit` of 500 by default, and `writeMode: "temporary"` or `"in-place"`. Set `transfer.preserveState: false` for a fresh verification.
+Operation parameters: `game`, `directory`, optional `cn`, `mode` (`full`/`base`), `voicePacks` and `predownload` (installation), `downloads` (8), `writes` (4), and `transfer`. `sourceVersion` is optional for updates. `predownload: true` selects the future branch, and `cacheOnly: true` caches update/repair data without applying it. `game.version` reports executable-based detection, and `game.nextAction` returns a decision without executing it. Transfer fields use bytes for `memoryLimit` and `diskLimit`, an `entryLimit` of 500 by default, and `writeMode: "temporary"` or `"in-place"`. Set `transfer.preserveState: false` for a fresh verification.
 
 For HTTP, run:
 
@@ -78,3 +79,11 @@ swift test --filter 'testStreamedPatchWithCachedInputs|testTransfer'
 ```
 
 Linux/macOS CI runs this focused suite. Existing live-manifest tests can be run separately.
+
+## Selecting the next action
+
+`next-action GAME DIR` and `game.nextAction` inspect saved operations before executable version detection. Matching unfinished installations/updates resume using their saved plans; a partial applied operation targeting an obsolete version is reconciled using the live installation manifest. Known older versions with an advertised diff update to live. An up-to-date installation caches an available future update, unless its payloads are already present. Cache-only receipts never establish an installed version. The decision contains action, source/target versions, branch, cache-only flag, scenario, voice packs and reason.
+
+Version detection uses `exe_file_name` from the launch configuration and version/MD5 records from the API. Multiple versions sharing one executable hash require matching completed installation history or an explicit source override. Source-file integrity is checked by the update pipeline; it does not require a full installation scan before choosing an action.
+
+The [TypeScript client](rpc-client/README.md) exposes both transports with no runtime dependencies.
