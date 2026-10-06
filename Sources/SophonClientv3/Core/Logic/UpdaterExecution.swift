@@ -1,0 +1,456 @@
+import AsyncAlgorithms
+import Foundation
+import HPatch
+
+extension Updater {
+  func execute(
+    _ plan: UpdatePlan, settings: TransferSettings, downloadCache: DownloadCache,
+    installer: Installer, reporter: UpdateReporter
+  ) async throws {
+    let execution = try await UpdateExecution(
+      plan: plan, gameDirectory: baseGameDir, settings: settings, downloadCache: downloadCache,
+      installer: installer, downloadWorkers: maxCocurrentDownloads,
+      writeWorkers: maxCocurrentWrites, reporter: reporter)
+    try await execution.run()
+  }
+
+  func predownload(
+    _ plan: UpdatePlan, settings: TransferSettings, downloadCache: DownloadCache,
+    reporter: UpdateReporter
+  ) async throws {
+    guard plan.patchSize <= settings.diskLimit else {
+      throw SophonClientError.UnknownError(
+        "The download cache limit is smaller than the predownload")
+    }
+    await reporter.record(
+      .planned(
+        sourceVersion: plan.sourceVersion, targetVersion: plan.targetVersion,
+        patchBytes: plan.patchSize, installBytes: plan.installSize,
+        totalFiles: plan.installFiles.count))
+    await reporter.record(.phaseChanged(.predownloading))
+    let limit = WorkLimiter(limit: min(maxCocurrentDownloads, settings.entryLimit))
+    do {
+      let downloads = try await withThrowingTaskGroup(of: CachedDownload.self) { group in
+        for bundle in plan.patchBundles {
+          group.addTask {
+            try await limit.withPermit {
+              let request = try bundle.downloadRequest()
+              let download = try await downloadCache.get(request, waitForSpace: false)
+              await reporter.record(
+                .bundleDownloaded(patchID: bundle.patchID, bytes: bundle.patchSize))
+              return download
+            }
+          }
+        }
+        var downloads: [CachedDownload] = []
+        do { while let download = try await group.next() { downloads.append(download) } } catch {
+          group.cancelAll()
+          throw error
+        }
+        return downloads
+      }
+      defer { withExtendedLifetime(downloads) {} }
+      await reporter.record(.finished(.completed))
+    } catch {
+      await reporter.record(
+        .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
+      throw error
+    }
+  }
+}
+
+extension PlannedPatchBundle {
+  func downloadRequest() throws -> DownloadRequest {
+    guard !downloadInfo.encryption, downloadInfo.password.isEmpty else {
+      throw SophonClientError.UnsupportedManifestConfiguration(
+        "Encrypted patch bundles are not supported")
+    }
+    return DownloadRequest(
+      chunkID: patchID, url: try downloadInfo.buildDownloadURL(patchID), md5: patchHash,
+      size: patchSize)
+  }
+}
+
+private struct ReadyPatch: Sendable {
+  let patch: PlannedPatch
+  let bundle: CachedDownload
+}
+
+private actor RepairTargets {
+  private var files: [URL: PlannedUpdateFile] = [:]
+  func add(_ file: PlannedUpdateFile) { files[file.fileURL] = file }
+  func all() -> [PlannedUpdateFile] { files.values.sorted { $0.fileURL.path < $1.fileURL.path } }
+}
+
+private final class UpdateExecution: Sendable {
+  private let plan: UpdatePlan
+  private let settings: TransferSettings
+  private let downloadCache: DownloadCache
+  private let installer: Installer
+  private let reporter: UpdateReporter
+  private let journal: UpdateJournal?
+  private let operationLock: TransferFileLock
+  private let snapshots: OriginalSnapshots
+  private let io: WorkLimiter
+  private let repairs = RepairTargets()
+  private let downloadWorkers: Int
+  private let workers: [PatchApplyWorker]
+
+  init(
+    plan: UpdatePlan, gameDirectory: URL, settings: TransferSettings, downloadCache: DownloadCache,
+    installer: Installer, downloadWorkers: Int, writeWorkers: Int, reporter: UpdateReporter
+  ) async throws {
+    self.settings = settings
+    self.downloadCache = downloadCache
+    self.installer = installer
+    self.downloadWorkers = downloadWorkers
+    self.reporter = reporter
+    io = WorkLimiter(limit: settings.ioPolicy == .serialized ? 1 : Int.max)
+    workers = (0..<(settings.ioPolicy == .serialized ? 1 : writeWorkers)).map(PatchApplyWorker.init)
+    operationLock = try await runTransferIO {
+      try TransferFileLock(gameDirectory.appendingPathComponent(".sophon-operation.lock"))
+    }
+    let installDirectory = InstallationJournal.directory(
+      settings: settings, gameDirectory: gameDirectory)
+    let installation = try await runTransferIO {
+      try InstallationJournal.load(directory: installDirectory)
+    }
+    guard installation?.finished != false else {
+      throw SophonClientError.UnknownError(
+        "Resume the unfinished installation before starting an update")
+    }
+    let stateDirectory = UpdateJournal.directory(settings: settings, gameDirectory: gameDirectory)
+    if !settings.preserveState { try await runTransferIO { try removeOwnedFile(stateDirectory) } }
+    let journal =
+      settings.preserveState
+      ? try await runTransferIO { try UpdateJournal(directory: stateDirectory, plan: plan) } : nil
+    self.journal = journal
+    let activePlan = journal?.plan ?? plan
+    self.plan = activePlan
+    let snapshotDirectory = settings.cacheURL.appendingPathComponent("snapshots")
+      .appendingPathComponent(transferKey(gameDirectory.path), isDirectory: true)
+    // RAM/disk snapshots are disposable. Durable in-place originals live separately.
+    try await runTransferIO { try removeOwnedFile(snapshotDirectory) }
+    let cache = try BinaryCache(
+      directory: snapshotDirectory, memoryLimit: settings.memoryLimit,
+      diskLimit: settings.diskLimit, entryLimit: settings.entryLimit)
+    let originals = settings.cacheURL.appendingPathComponent("originals")
+      .appendingPathComponent(transferKey(gameDirectory.path), isDirectory: true)
+    let sizes = try await runTransferIO {
+      try OriginalSnapshots.existingSizes(directory: originals)
+    }
+    snapshots = OriginalSnapshots(
+      cache: cache, directory: originals, diskLimit: settings.diskLimit, io: io, plan: activePlan,
+      writeMode: settings.writeMode, existingSizes: sizes)
+  }
+
+  func run() async throws {
+    await reporter.record(
+      .planned(
+        sourceVersion: plan.sourceVersion, targetVersion: plan.targetVersion,
+        patchBytes: plan.patchSize, installBytes: plan.installSize,
+        totalFiles: plan.installFiles.count))
+    do {
+      var recovered = Set<URL>()
+      for patch in plan.patchBundles.flatMap(\.patches) {
+        if try await recover(patch.target) {
+          recovered.insert(patch.target.fileURL)
+          try await done(patch, skipped: true)
+        } else if journal?.stage(of: patch.target.fileURL) == .repair {
+          recovered.insert(patch.target.fileURL)
+          await repairs.add(patch.target)
+          await reporter.record(.fileNeedsRepair(fileURL: patch.target.fileURL))
+          if let original = patch.original { try await snapshots.consumed(original) }
+        }
+      }
+      try await snapshots.preloadSharedSources(plan)
+      await reporter.record(.phaseChanged(.running))
+      try await pipeline(excluding: recovered)
+      let repairFiles = await repairs.all()
+      if !repairFiles.isEmpty { try await repair(repairFiles) }
+      await reporter.record(.phaseChanged(.deleting))
+      for file in plan.deleteFiles {
+        try Task.checkCancellation()
+        let removed = try await runTransferIO {
+          let exists = FileManager.default.fileExists(atPath: file.fileURL.path)
+          try removeOwnedFile(file.fileURL)
+          return exists
+        }
+        await reporter.record(.fileDeleted(fileURL: file.fileURL, bytes: removed ? file.size : 0))
+      }
+      try await runTransferIO(checkCancellation: false) { [journal] in try journal?.complete() }
+      await reporter.record(.finished(.completed))
+    } catch {
+      await snapshots.cancel()
+      await reporter.record(
+        .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
+      throw error
+    }
+  }
+
+  private func pipeline(excluding recovered: Set<URL>) async throws {
+    let ready = AsyncChannel<ReadyPatch>()
+    let downloadLimit = WorkLimiter(limit: min(downloadWorkers, settings.entryLimit))
+    try await withThrowingTaskGroup(of: Void.self) { group in
+      group.addTask { [self] in
+        defer { ready.finish() }
+        try await withThrowingTaskGroup(of: Void.self) { downloads in
+          for bundle in plan.patchBundles {
+            let patches = bundle.patches.filter { !recovered.contains($0.target.fileURL) }
+            guard !patches.isEmpty else { continue }
+            downloads.addTask { [self] in
+              try await downloadLimit.withPermit {
+                let payload = try await downloadCache.get(bundle.downloadRequest())
+                await reporter.record(
+                  .bundleDownloaded(patchID: bundle.patchID, bytes: bundle.patchSize))
+                for patch in patches {
+                  try Task.checkCancellation()
+                  await ready.send(ReadyPatch(patch: patch, bundle: payload))
+                }
+              }
+            }
+          }
+          do { while try await downloads.next() != nil {} } catch {
+            downloads.cancelAll()
+            throw error
+          }
+        }
+      }
+      for worker in workers {
+        group.addTask { [self] in
+          for await job in ready {
+            try Task.checkCancellation()
+            try await process(job, worker: worker)
+          }
+        }
+      }
+      do { while try await group.next() != nil {} } catch {
+        group.cancelAll()
+        ready.finish()
+        throw error
+      }
+    }
+  }
+
+  private func process(_ job: ReadyPatch, worker: PatchApplyWorker) async throws {
+    let patch = job.patch
+    let input = PatchInput.download(job.bundle, offset: patch.patchOffset, size: patch.patchLength)
+    let isHDiff = try await runTransferIO { try input.isHDiff() }
+    var originalInput: PatchInput?
+    if isHDiff, let original = patch.original {
+      let snapshot = try await snapshots.get(original)
+      if original.fileURL == patch.target.fileURL, !snapshot.fromSavedOriginal,
+        snapshot.observed?.size == patch.target.size,
+        snapshot.observed?.md5 == patch.target.md5.lowercased()
+      {
+        try await done(patch, skipped: true)
+        return
+      }
+      if original.fileURL != patch.target.fileURL || snapshot.fromSavedOriginal {
+        if try await current(patch.target) {
+          try await done(patch, skipped: true)
+          return
+        }
+      }
+      guard let source = snapshot.input else {
+        try await queueRepair(patch)
+        return
+      }
+      originalInput = source
+    } else if try await current(patch.target) {
+      try await done(patch, skipped: true)
+      return
+    }
+
+    let paths = outputPaths(patch.target)
+    let output = settings.writeMode == .inPlace ? patch.target.fileURL : paths.temporary
+    let request = PatchApplyRequest(
+      original: originalInput, patch: input, target: patch.target, outputURL: output,
+      synchronize: settings.ioPolicy == .serialized)
+    do {
+      try await io.withPermit { [journal] in
+        try await runTransferIO { try journal?.record(patch.target.fileURL, stage: .writing) }
+        try await worker.run(request)
+        try await runTransferIO(checkCancellation: false) {
+          if output != patch.target.fileURL {
+            try commitUpdatedFile(
+              temporary: output, target: patch.target.fileURL, backup: paths.backup)
+          }
+          try journal?.record(patch.target.fileURL, stage: .completed)
+        }
+      }
+      try await done(patch, skipped: false)
+    } catch {
+      if error is CancellationError || Task.isCancelled { throw error }
+      if error is HPatchError || error is BinaryCacheError {
+        try await queueRepair(patch)
+      } else if let error = error as? SophonClientError {
+        switch error {
+        case .InvalidChecksumError, .SizeMismatch, .UnsupportedManifestConfiguration:
+          try await queueRepair(patch)
+        default: throw error
+        }
+      } else {
+        throw error
+      }
+    }
+  }
+
+  private func current(_ target: PlannedUpdateFile) async throws -> Bool {
+    try await io.withPermit {
+      let digest = try await runTransferIO { try digestFile(target.fileURL) }
+      return digest?.size == target.size && digest?.md5 == target.md5.lowercased()
+    }
+  }
+
+  private func outputPaths(_ target: PlannedUpdateFile) -> (temporary: URL, backup: URL) {
+    let key = transferKey(target.fileURL.path + target.md5).prefix(32)
+    let directory = target.fileURL.deletingLastPathComponent()
+    return (
+      directory.appendingPathComponent(".sophon-\(key).new"),
+      directory.appendingPathComponent(".sophon-\(key).old")
+    )
+  }
+
+  private func recover(_ target: PlannedUpdateFile) async throws -> Bool {
+    let paths = outputPaths(target)
+    let journal = journal
+    return try await io.withPermit {
+      try await runTransferIO {
+        if journal?.stage(of: target.fileURL) == .completed {
+          try removeOwnedFile(paths.temporary)
+          try removeOwnedFile(paths.backup)
+          return true
+        }
+        if FileManager.default.fileExists(atPath: paths.backup.path),
+          !FileManager.default.fileExists(atPath: target.fileURL.path)
+        {
+          try FileManager.default.moveItem(at: paths.backup, to: target.fileURL)
+        }
+        if let digest = try digestFile(paths.temporary),
+          digest.size == target.size, digest.md5 == target.md5.lowercased()
+        {
+          try commitUpdatedFile(
+            temporary: paths.temporary, target: target.fileURL, backup: paths.backup)
+          return true
+        }
+        if journal?.stage(of: target.fileURL) != nil,
+          let digest = try digestFile(target.fileURL),
+          digest.size == target.size, digest.md5 == target.md5.lowercased()
+        {
+          try removeOwnedFile(paths.backup)
+          return true
+        }
+        return false
+      }
+    }
+  }
+
+  private func done(_ patch: PlannedPatch, skipped: Bool) async throws {
+    let paths = outputPaths(patch.target)
+    try await io.withPermit { [journal] in
+      try await runTransferIO(checkCancellation: false) {
+        try removeOwnedFile(paths.temporary)
+        try removeOwnedFile(paths.backup)
+        try journal?.record(patch.target.fileURL, stage: .completed)
+      }
+    }
+    await reporter.record(
+      .fileCompleted(fileURL: patch.target.fileURL, bytes: patch.target.size, skipped: skipped))
+    if let original = patch.original { try await snapshots.consumed(original) }
+  }
+
+  private func queueRepair(_ patch: PlannedPatch) async throws {
+    try await runTransferIO { [journal] in try journal?.record(patch.target.fileURL, stage: .repair)
+    }
+    await repairs.add(patch.target)
+    await reporter.record(.fileNeedsRepair(fileURL: patch.target.fileURL))
+    if let original = patch.original { try await snapshots.consumed(original) }
+  }
+
+  private func repair(_ files: [PlannedUpdateFile]) async throws {
+    await reporter.record(.phaseChanged(.repairing))
+    let paths = Dictionary(
+      uniqueKeysWithValues: files.map {
+        ($0.fileURL, settings.writeMode == .inPlace ? $0.fileURL : outputPaths($0).temporary)
+      })
+    let repairPlan = try makeRepairPlan(files, outputURLs: paths)
+    for file in repairPlan.plannedFiles {
+      try await runTransferIO {
+        try FileManager.default.createDirectory(
+          at: file.fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard FileManager.default.createFile(atPath: file.fileURL.path, contents: nil) else {
+          throw SophonClientError.UnknownError("Cannot create repair output")
+        }
+        let handle = try FileHandle(forUpdating: file.fileURL)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: file.size)
+      }
+    }
+    try await installer.execute(repairPlan)
+    if settings.ioPolicy == .serialized {
+      // Flush the whole write batch before verification starts reading from the target drive.
+      for output in paths.values {
+        try await runTransferIO {
+          let handle = try FileHandle(forWritingTo: output)
+          defer { try? handle.close() }
+          try handle.synchronize()
+        }
+      }
+    }
+    for file in files {
+      let output = paths[file.fileURL]!
+      let paths = outputPaths(file)
+      try await runTransferIO { [journal] in
+        let digest = try digestFile(output)
+        guard digest?.size == file.size, digest?.md5 == file.md5.lowercased() else {
+          throw SophonClientError.InvalidChecksumError(
+            expected: file.md5, actual: digest?.md5 ?? "missing")
+        }
+        if output != file.fileURL {
+          try commitUpdatedFile(temporary: output, target: file.fileURL, backup: paths.backup)
+        }
+        try journal?.record(file.fileURL, stage: .completed)
+      }
+      await reporter.record(.fileCompleted(fileURL: file.fileURL, bytes: file.size, skipped: false))
+    }
+  }
+}
+
+private func makeRepairPlan(_ files: [PlannedUpdateFile], outputURLs: [URL: URL]) throws
+  -> InstallationPlan
+{
+  var chunks: [String: RequiredChunk] = [:]
+  var plannedFiles: [PlannedFile] = []
+  for file in files {
+    let output = outputURLs[file.fileURL]!
+    plannedFiles.append(
+      PlannedFile(
+        fileURL: output, size: file.size, md5: file.md5,
+        requiredChunkCount: file.installChunks.count, needsTrimming: false))
+    for var chunk in file.installChunks {
+      chunk.chunkApplicationInfos = chunk.chunkApplicationInfos.map {
+        ChunkApplicationInfo(fileURL: output, offset: $0.offset)
+      }
+      if var existing = chunks[chunk.chunkID] {
+        guard existing.uncompressedMd5 == chunk.uncompressedMd5,
+          existing.compressedMd5 == chunk.compressedMd5,
+          existing.uncompressedSize == chunk.uncompressedSize,
+          existing.compressedSize == chunk.compressedSize
+        else { throw SophonClientError.UnknownError("Conflicting repair chunk metadata") }
+        existing.chunkApplicationInfos += chunk.chunkApplicationInfos
+        chunks[chunk.chunkID] = existing
+      } else {
+        chunks[chunk.chunkID] = chunk
+      }
+    }
+  }
+  let required = chunks.values.sorted { $0.chunkID < $1.chunkID }
+  return InstallationPlan(
+    totalChunkCount: required.count,
+    downloadSize: required.reduce(0) {
+      $0 + ($1.downloadInfo.compression ? $1.compressedSize : $1.uncompressedSize)
+    },
+    diskWriteSize: files.reduce(0) { $0 + $1.size }, requiredChunks: required,
+    plannedFiles: plannedFiles)
+}
