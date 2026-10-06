@@ -8,8 +8,16 @@ struct DownloadWorker: Sendable {
   let session: URLSession
   let maxRetries: Int
   let retryInterval: Int
+  var cache: DownloadCache? = nil
 
   private func downloadOnce(_ downloadRequest: DownloadRequest) async throws -> Data {
+    if let cache {
+      let cached = try await cache.get(downloadRequest)
+      return try await runTransferIO {
+        defer { withExtendedLifetime(cached) {} }
+        return try Data(contentsOf: cached.fileURL)
+      }
+    }
     let request = URLRequest(url: downloadRequest.url)
     let (data, response) = try await session.data(for: request)
 
@@ -39,7 +47,8 @@ struct DownloadWorker: Sendable {
   ) async throws -> Data {
     var lastError: Error?
 
-    for attempt in 0...maxRetries {
+    // The persistent cache already retries and retains each received range prefix.
+    for attempt in 0...(cache == nil ? maxRetries : 0) {
       do {
         let data = try await downloadOnce(downloadRequest)
         await reporter?.record(
