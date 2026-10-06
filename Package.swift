@@ -21,6 +21,10 @@ let package = Package(
     .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),
     .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
     .package(url: "https://github.com/sushichop/Puppy.git", from: "0.11.0"),
+    .package(
+      url: "https://github.com/ohaiibuzzle/hdiffswift.git",
+      revision: "2b987f02fd190f8df3ff27efe85e141895e0a195"),
+    .package(url: "https://github.com/apple/swift-nio.git", exact: "2.104.0"),
   ],
   targets: [
     // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -34,6 +38,7 @@ let package = Package(
         .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
         .product(name: "Logging", package: "swift-log"),
         .product(name: "Puppy", package: "Puppy"),
+        .product(name: "HPatch", package: "hdiffswift"),
         "HYPAPIClient",
       ],
       plugins: [
@@ -46,6 +51,9 @@ let package = Package(
       dependencies: [
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
         .product(name: "Yams", package: "Yams"),
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "NIOHTTP1", package: "swift-nio"),
         "HYPAPIClient",
         "SophonClientv3",
       ]
@@ -56,7 +64,8 @@ let package = Package(
     ),
     .testTarget(
       name: "SophonClientv3Tests",
-      dependencies: ["SophonClientv3"]
+      dependencies: ["SophonClientv3"],
+      resources: [.copy("Fixtures")]
     ),
   ],
   swiftLanguageModes: [.v6]
