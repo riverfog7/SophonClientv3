@@ -436,7 +436,8 @@ public final class SophonClientv3: @unchecked Sendable {
       let updateDirectory = UpdateJournal.directory(
         settings: transferSettings, gameDirectory: baseGameDir)
       let update = try await runTransferIO { try UpdateJournal.load(directory: updateDirectory) }
-      let liveTarget = try await selectedBranch(predownload: predownload).tag
+      let branch = try await selectedBranch(predownload: predownload)
+      let liveTarget = branch.tag
       guard
         update?.finished != false || update?.cacheOnly == true
           || update?.plan.targetVersion != liveTarget
@@ -455,7 +456,7 @@ public final class SophonClientv3: @unchecked Sendable {
       let plan: InstallationPlan
       let journal: InstallationJournal?
       if let saved, !saved.finished, saved.version == liveTarget {
-        guard saved.gameID == gameID, saved.mode == mode, saved.predownload == predownload,
+        guard saved.gameID == gameID, saved.mode == mode,
           saved.voicePacks == additionalVoicePackMatchingFields.sorted()
         else {
           throw SophonClientError.UnknownError(
@@ -473,11 +474,10 @@ public final class SophonClientv3: @unchecked Sendable {
       } else {
         plan = try await makeInstallationPlan(
           mode: mode, voicePacks: additionalVoicePackMatchingFields, predownload: predownload,
-          reporter: reporter)
+          branch: branch, reporter: reporter)
         if transferSettings.preserveState {
-          let version = try manifestManager.getGameSubbranch(predownload: predownload).tag
           let state = SavedInstallationState(
-            gameID: gameID, version: version, mode: mode,
+            gameID: gameID, version: liveTarget, mode: mode,
             voicePacks: additionalVoicePackMatchingFields.sorted(),
             predownload: predownload, plan: plan, completedApplications: [], trimmedFiles: [],
             finished: false)
@@ -515,24 +515,14 @@ public final class SophonClientv3: @unchecked Sendable {
 
   private func makeInstallationPlan(
     mode: GameBranchCategoryScenario, voicePacks: Set<String>, predownload: Bool,
-    reporter: InstallationReporter
+    branch: GameSubBranch, reporter: InstallationReporter
   ) async throws -> InstallationPlan {
     let matchingFields = try await getRequiredMatchingFields(
-      mode: mode, additionalVoicePackMatchingFields: voicePacks, predownload: predownload)
+      mode: mode, additionalVoicePackMatchingFields: voicePacks, predownload: predownload,
+      selectedBranch: branch)
     await reporter.record(.metadataPlanned(totalManifests: matchingFields.count))
-    let manager = manifestManager
-    let infos = try await withThrowingTaskGroup(of: (Manifest, SophonDownloadInfo).self) { group in
-      for field in matchingFields {
-        group.addTask {
-          try Task.checkCancellation()
-          return try await manager.getSophonManifest(
-            matchingField: field, predownload: predownload, reporter: reporter)
-        }
-      }
-      var infos: [(Manifest, SophonDownloadInfo)] = []
-      for try await info in group { infos.append(info) }
-      return infos
-    }
+    let infos = try await manifestManager.getInstallInfos(
+      matchingFields: matchingFields, branch: branch, predownload: predownload, reporter: reporter)
     return try await installer.scan(installInfos: infos, reporter: reporter)
   }
 }

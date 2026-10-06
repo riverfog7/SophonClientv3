@@ -229,4 +229,27 @@ final class CachedManifestManager: Sendable {
       return (install, update)
     }
   }
+
+  internal func getInstallInfos(
+    matchingFields: Set<String>, branch: GameSubBranch, predownload: Bool,
+    reporter: InstallationReporter
+  ) async throws -> [(Manifest, SophonDownloadInfo)] {
+    let build = try await apiClient.getSophonBuildInfo(branch)
+    return try await withThrowingTaskGroup(of: (Manifest, SophonDownloadInfo).self) { group in
+      for field in matchingFields {
+        guard let info = build.find(field) else {
+          throw SophonClientError.InvalidManifestMatchingFieldError(field)
+        }
+        group.addTask { [self] in
+          let manifest: Manifest = try await _getManifest(
+            manifest: info.manifest, downloadInfo: info.manifestDownload)
+          await reporter.record(.manifestPulled(matchingField: field, predownload: predownload))
+          return (manifest, info.chunkDownload)
+        }
+      }
+      var infos: [(Manifest, SophonDownloadInfo)] = []
+      for try await info in group { infos.append(info) }
+      return infos
+    }
+  }
 }
