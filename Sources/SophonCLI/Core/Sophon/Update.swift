@@ -55,9 +55,12 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
   @Argument(help: "Game directory.") var directory: String
   @Option(
     name: .customLong("from"),
-    help: "Installed source version, or the source version of an unfinished update.")
-  var sourceVersion: String
+    help: "Source version override; defaults to the saved operation or executable hash detection.")
+  var sourceVersion: String?
   @Flag(help: "Use CN endpoints.") var cn = false
+  @Flag(help: "Select the future branch instead of the live branch.") var predownload = false
+  @Flag(help: "Cache update payloads without applying patches or deleting game files.")
+  var cacheOnly = false
   @Option(help: "Installation category scenario: full or base.") var mode = "full"
   @Option(help: "Maximum parallel HTTP range downloads.") var maxConcurrentDownloads = 8
   @Option(help: "Maximum parallel file patch workers.") var maxConcurrentWrites = 4
@@ -65,7 +68,7 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
   @OptionGroup var transfer: TransferCLIOptions
 
   mutating func validate() throws {
-    guard ["full", "base"].contains(mode), !sourceVersion.isEmpty,
+    guard ["full", "base"].contains(mode), sourceVersion?.isEmpty != true,
       maxConcurrentDownloads > 0, maxConcurrentWrites > 0
     else { throw ValidationError("Invalid update scenario, source version, or worker count") }
   }
@@ -76,51 +79,39 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
       downloads: maxConcurrentDownloads, writes: maxConcurrentWrites)
     let scenario: GameBranchCategoryScenario = mode == "base" ? .base : .full
     let sourceVersion = sourceVersion
+    let predownload = predownload
+    let cacheOnly = cacheOnly
     if plan {
-      let plan = try await client.planUpdate(sourceVersion: sourceVersion, mode: scenario)
+      let plan = try await client.planUpdate(
+        sourceVersion: sourceVersion, mode: scenario, predownload: predownload)
       let encoder = JSONEncoder()
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
       print(String(decoding: try encoder.encode(plan), as: UTF8.self))
       return
     }
     try await runUpdateOperation(client: client) { reporter in
-      try await client.update(sourceVersion: sourceVersion, mode: scenario, reporter: reporter)
+      try await client.update(
+        sourceVersion: sourceVersion, mode: scenario, predownload: predownload,
+        cacheOnly: cacheOnly, reporter: reporter)
     }
   }
 }
 
-struct PredownloadCLI: AsyncParsableCommand, Sendable {
+struct NextActionCLI: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
-    commandName: "predownload",
-    abstract: "Cache and verify update bundles without modifying game files.")
-  @Argument(help: "Game ID or game biz.") var game: String
-  @Argument(help: "Game directory used for installed category and voice-pack selection.")
-  var directory: String
-  @Option(name: .customLong("from"), help: "Installed source version.") var sourceVersion: String
-  @Flag(help: "Use CN endpoints.") var cn = false
-  @Flag(help: "Cache the current live update instead of the future predownload branch.") var live =
-    false
-  @Option(help: "Installation category scenario: full or base.") var mode = "full"
-  @Option(help: "Maximum parallel HTTP range downloads.") var maxConcurrentDownloads = 8
+    commandName: "next-action", abstract: "Return the next appropriate action without executing it."
+  )
+  @Argument var game: String
+  @Argument var directory: String
+  @Flag var cn = false
   @OptionGroup var transfer: TransferCLIOptions
-
-  mutating func validate() throws {
-    guard ["full", "base"].contains(mode), !sourceVersion.isEmpty, maxConcurrentDownloads > 0 else {
-      throw ValidationError("Invalid predownload scenario, version, or worker count")
-    }
-  }
 
   mutating func run() async throws {
     let client = try await makeOperationClient(
-      game: game, directory: directory, cn: cn, transfer: transfer.settings,
-      downloads: maxConcurrentDownloads)
-    let scenario: GameBranchCategoryScenario = mode == "base" ? .base : .full
-    let sourceVersion = sourceVersion
-    let future = !live
-    try await runUpdateOperation(client: client) { reporter in
-      try await client.predownload(
-        sourceVersion: sourceVersion, mode: scenario, futureBranch: future, reporter: reporter)
-    }
+      game: game, directory: directory, cn: cn, transfer: transfer.settings)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    print(String(decoding: try encoder.encode(await client.nextAction()), as: UTF8.self))
   }
 }
 
@@ -183,7 +174,7 @@ private func runUpdateOperation(
     for await _ in subscription.events {
       let state = await reporter.snapshot()
       print(
-        "\(state.phase.rawValue): \(state.completedFiles)/\(state.totalFiles) files, \(state.downloadedBytes) patch bytes ready"
+        "\(state.phase.rawValue): \(state.completedFiles + state.cachedFiles)/\(state.totalFiles) files, \(state.downloadedBytes) patch bytes ready"
       )
     }
   }

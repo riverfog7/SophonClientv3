@@ -6,7 +6,7 @@ struct SophonCLI: AsyncParsableCommand {
     commandName: "sophon-cli",
     abstract: "A Sophon command line utility",
     subcommands: [
-      HYPAPIClientEntrypoint.self, InstallCLI.self, UpdateCLI.self, PredownloadCLI.self,
+      HYPAPIClientEntrypoint.self, InstallCLI.self, UpdateCLI.self, NextActionCLI.self,
       UpdateStateCLI.self, RPCCLI.self,
     ],
   )

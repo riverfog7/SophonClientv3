@@ -76,15 +76,15 @@ private struct RPCOperationParameters: Decodable, Sendable {
   let sourceVersion: String?
   let cn: Bool
   let mode: String
-  let futureBranch: Bool
   let predownload: Bool
+  let cacheOnly: Bool
   let voicePacks: [String]
   let downloads: Int
   let writes: Int
   let transfer: TransferSettings
 
   enum CodingKeys: String, CodingKey {
-    case game, directory, sourceVersion, cn, mode, futureBranch, predownload, voicePacks, downloads,
+    case game, directory, sourceVersion, cn, mode, predownload, cacheOnly, voicePacks, downloads,
       writes,
       transfer
   }
@@ -96,8 +96,8 @@ private struct RPCOperationParameters: Decodable, Sendable {
     sourceVersion = try values.decodeIfPresent(String.self, forKey: .sourceVersion)
     cn = try values.decodeIfPresent(Bool.self, forKey: .cn) ?? false
     mode = try values.decodeIfPresent(String.self, forKey: .mode) ?? "full"
-    futureBranch = try values.decodeIfPresent(Bool.self, forKey: .futureBranch) ?? true
     predownload = try values.decodeIfPresent(Bool.self, forKey: .predownload) ?? false
+    cacheOnly = try values.decodeIfPresent(Bool.self, forKey: .cacheOnly) ?? false
     voicePacks = try values.decodeIfPresent([String].self, forKey: .voicePacks) ?? []
     downloads = try values.decodeIfPresent(Int.self, forKey: .downloads) ?? 8
     writes = try values.decodeIfPresent(Int.self, forKey: .writes) ?? 4
@@ -191,23 +191,27 @@ actor RPCDispatcher {
             "api.resolveGame", "api.gameInfo", "api.lookupVersion", "api.compareBranches",
             "api.checkUpdatePath",
             "api.sophonBuild", "api.sophonPatchBuild", "update.plan", "update.start",
-            "update.predownload", "install.start", "state.inspect", "operation.status",
+            "game.nextAction", "game.version", "install.start", "state.inspect", "operation.status",
             "operation.wait", "operation.cancel",
           ].map(JSONValue.string))
       ])
     case "rpc.shutdown":
       await shutdown()
       return .bool(true)
-    case "install.start", "update.start", "update.predownload":
+    case "install.start", "update.start":
       return try start(method, params: decode(RPCOperationParameters.self, params))
     case "update.plan":
-      let futureBranch = params.object?["futureBranch"]?.bool ?? false
       let params = try decode(RPCOperationParameters.self, params)
       let client = try await client(params)
       return try .value(
         await client.planUpdate(
-          sourceVersion: try requireVersion(params), mode: params.mode == "base" ? .base : .full,
-          predownload: futureBranch))
+          sourceVersion: params.sourceVersion, mode: params.mode == "base" ? .base : .full,
+          predownload: params.predownload))
+    case "game.nextAction", "game.version":
+      let parameters = try decode(RPCOperationParameters.self, params)
+      let client = try await client(parameters)
+      if method == "game.version" { return try .value(await client.detectInstalledVersion()) }
+      return try .value(await client.nextAction())
     case "state.inspect":
       let params = try decode(RPCStateParameters.self, params)
       if params.operation == "install" {
@@ -252,7 +256,6 @@ actor RPCDispatcher {
 
   private func start(_ method: String, params: RPCOperationParameters) throws -> JSONValue {
     guard !stopping else { throw RPCFailure(code: -32003, message: "RPC server is stopping") }
-    if method != "install.start" { _ = try requireVersion(params) }
     let path = URL(fileURLWithPath: params.directory).standardizedFileURL.resolvingSymlinksInPath()
       .path
     guard !directories.values.contains(path) else {
@@ -308,14 +311,9 @@ actor RPCDispatcher {
           }
         }
         do {
-          if method == "update.predownload" {
-            try await operationClient.predownload(
-              sourceVersion: requireVersion(params), mode: mode, futureBranch: params.futureBranch,
-              reporter: reporter)
-          } else {
-            try await operationClient.update(
-              sourceVersion: requireVersion(params), mode: mode, reporter: reporter)
-          }
+          try await operationClient.update(
+            sourceVersion: params.sourceVersion, mode: mode, predownload: params.predownload,
+            cacheOnly: params.cacheOnly, reporter: reporter)
         } catch {
           await reporter.unsubscribe(subscription.id)
           await forwarding.value
@@ -369,13 +367,6 @@ actor RPCDispatcher {
     try await makeOperationClient(
       game: params.game, directory: params.directory, cn: params.cn,
       transfer: params.transfer, downloads: params.downloads, writes: params.writes)
-  }
-
-  private func requireVersion(_ params: RPCOperationParameters) throws -> String {
-    guard let version = params.sourceVersion, !version.isEmpty else {
-      throw RPCFailure(code: -32602, message: "sourceVersion is required")
-    }
-    return version
   }
 
   private func api(_ method: String, params: JSONValue) async throws -> JSONValue {
