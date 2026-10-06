@@ -1,0 +1,321 @@
+import ArgumentParser
+import Foundation
+import NIOCore
+import NIOHTTP1
+import NIOPosix
+
+enum RPCTransport: String, CaseIterable, ExpressibleByArgument {
+  case stdio
+  case http
+}
+
+struct RPCCLI: AsyncParsableCommand {
+  static let configuration = CommandConfiguration(
+    commandName: "rpc", abstract: "Expose CLI operations through JSON-RPC 2.0.")
+  @Option(help: "Transport: stdio (default) or localhost HTTP.") var transport: RPCTransport =
+    .stdio
+  @Option(help: "HTTP port; zero selects an available port.") var port = 0
+  @Option(help: "Optional bearer token required by the HTTP transport.") var token: String?
+
+  mutating func validate() throws {
+    guard (0...65535).contains(port) else {
+      throw ValidationError("Port must be between 0 and 65535")
+    }
+  }
+
+  mutating func run() async throws {
+    let writer = RPCOutput()
+    if transport == .stdio {
+      let dispatcher = RPCDispatcher { value in try? await writer.send(value) }
+      let input = RPCInput()
+      let interrupts = InstallInterrupts {
+        input.stop()
+        Task { await dispatcher.shutdown() }
+      }
+      do {
+        try await withTaskCancellationHandler {
+          try await withThrowingTaskGroup(of: Void.self) { responses in
+            var pending = 0
+            while !Task.isCancelled, !(await dispatcher.stopping) {
+              guard let data = try await input.next() else { break }
+              if containsRPCShutdown(data) {
+                if let response = await dispatcher.handle(data) { try await writer.send(response) }
+                if await dispatcher.stopping { break }
+                continue
+              }
+              if pending >= 128 {
+                _ = try await responses.next()
+                pending -= 1
+              }
+              responses.addTask {
+                if let response = await dispatcher.handle(data) { try await writer.send(response) }
+              }
+              pending += 1
+            }
+            responses.cancelAll()
+            await dispatcher.shutdown()
+            while try await responses.next() != nil {}
+          }
+        } onCancel: {
+          input.stop()
+          Task { await dispatcher.shutdown() }
+        }
+      } catch {
+        await dispatcher.shutdown()
+        withExtendedLifetime(interrupts) {}
+        throw error
+      }
+      await dispatcher.shutdown()
+      withExtendedLifetime(interrupts) {}
+    } else {
+      try await serveHTTP(port: port, token: token, writer: writer)
+    }
+  }
+}
+
+private func containsRPCShutdown(_ data: Data) -> Bool {
+  guard let value = try? JSONDecoder().decode(JSONValue.self, from: data) else { return false }
+  if case .array(let values) = value {
+    return values.contains { $0.object?["method"]?.string == "rpc.shutdown" }
+  }
+  return value.object?["method"]?.string == "rpc.shutdown"
+}
+
+private actor RPCOutput {
+  private let queue = DispatchQueue(label: "sophon.rpc.stdout", qos: .utility)
+
+  func send(_ value: JSONValue) async throws { try await send(JSONEncoder().encode(value)) }
+
+  func send(_ data: Data) async throws {
+    var framed = data
+    framed.append(10)
+    let bytes = framed
+    try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<Void, any Error>) in
+      queue.async {
+        continuation.resume(with: Result { try FileHandle.standardOutput.write(contentsOf: bytes) })
+      }
+    }
+  }
+}
+
+private final class RPCInput: @unchecked Sendable {
+  private let lock = NSLock()
+  private let queue = DispatchQueue(label: "sophon.rpc.stdin", qos: .utility)
+  private var pending: CheckedContinuation<Data?, any Error>?
+  private var stopped = false
+  // Accessed only on the reader queue.
+  private var buffer = Data()
+
+  func next() async throws -> Data? {
+    try await withCheckedThrowingContinuation { continuation in
+      let shouldRead = lock.withLock {
+        guard !stopped else { return false }
+        pending = continuation
+        return true
+      }
+      guard shouldRead else {
+        continuation.resume(returning: nil)
+        return
+      }
+      queue.async {
+        let result = Result { try self.readFrame() }
+        let continuation = self.lock.withLock {
+          let pending = self.pending
+          self.pending = nil
+          return pending
+        }
+        continuation?.resume(with: result)
+      }
+    }
+  }
+
+  private func readFrame() throws -> Data? {
+    let limit = 1024 * 1024
+    let descriptor = FileHandle.standardInput.fileDescriptor
+    var chunk = [UInt8](repeating: 0, count: 16 * 1024)
+    while !lock.withLock({ stopped }) {
+      if let newline = buffer.firstIndex(of: 10) {
+        guard newline - buffer.startIndex <= limit else {
+          throw ValidationError("RPC line exceeds 1 MiB")
+        }
+        let line = Data(buffer.prefix(upTo: newline))
+        buffer.removeSubrange(buffer.startIndex...newline)
+        return line
+      }
+      guard buffer.count <= limit else { throw ValidationError("RPC line exceeds 1 MiB") }
+      var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+      let ready = poll(&pollDescriptor, 1, 50)
+      if ready < 0 {
+        if errno == EINTR { continue }
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+      }
+      if ready == 0 { continue }
+      let count = chunk.withUnsafeMutableBytes { read(descriptor, $0.baseAddress, $0.count) }
+      if count < 0 {
+        if errno == EINTR || errno == EAGAIN { continue }
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+      }
+      if count == 0 {
+        if buffer.isEmpty { return nil }
+        let line = buffer
+        buffer = Data()
+        return line
+      }
+      buffer.append(contentsOf: chunk.prefix(count))
+    }
+    return nil
+  }
+
+  func stop() {
+    let continuation = lock.withLock {
+      stopped = true
+      let pending = pending
+      self.pending = nil
+      return pending
+    }
+    continuation?.resume(returning: nil)
+  }
+}
+
+private func serveHTTP(port: Int, token: String?, writer: RPCOutput) async throws {
+  let dispatcher = RPCDispatcher()
+  let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+  let shutdown = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+  do {
+    let channel = try await ServerBootstrap(group: group)
+      .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+      .childChannelInitializer { channel in
+        channel.pipeline.configureHTTPServerPipeline().flatMap {
+          channel.pipeline.addHandler(
+            HTTPRPCHandler(dispatcher: dispatcher, token: token) {
+              shutdown.continuation.yield(())
+            })
+        }
+      }
+      .bind(host: "127.0.0.1", port: port).get()
+    let actualPort = channel.localAddress?.port ?? port
+    try await writer.send(
+      .object([
+        "jsonrpc": .string("2.0"), "method": .string("rpc.listening"),
+        "params": .object(["url": .string("http://127.0.0.1:\(actualPort)/rpc")]),
+      ]))
+    let interrupts = InstallInterrupts {
+      Task {
+        await dispatcher.shutdown()
+        try? await channel.close().get()
+      }
+    }
+    let stopping = Task {
+      for await _ in shutdown.stream {
+        if Task.isCancelled { return }
+        try? await channel.close().get()
+        return
+      }
+    }
+    defer {
+      stopping.cancel()
+      shutdown.continuation.finish()
+      withExtendedLifetime(interrupts) {}
+    }
+    try await withTaskCancellationHandler {
+      try await channel.closeFuture.get()
+    } onCancel: {
+      Task { try? await channel.close().get() }
+    }
+    await dispatcher.shutdown()
+    try await group.shutdownGracefully()
+  } catch {
+    await dispatcher.shutdown()
+    try? await group.shutdownGracefully()
+    throw error
+  }
+}
+
+private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
+  typealias InboundIn = HTTPServerRequestPart
+  typealias OutboundOut = HTTPServerResponsePart
+  private let dispatcher: RPCDispatcher
+  private let token: String?
+  private let onShutdown: @Sendable () -> Void
+  private var head: HTTPRequestHead?
+  private var body = Data()
+  private var rejected = false
+
+  init(dispatcher: RPCDispatcher, token: String?, onShutdown: @escaping @Sendable () -> Void) {
+    self.dispatcher = dispatcher
+    self.token = token
+    self.onShutdown = onShutdown
+  }
+
+  func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+    switch unwrapInboundIn(data) {
+    case .head(let head):
+      self.head = head
+      body = Data()
+      rejected = false
+      if head.method != .POST || !["/rpc", "/"].contains(head.uri) {
+        rejected = true
+        reply(context, status: .notFound)
+      } else if let token, head.headers.first(name: "Authorization") != "Bearer \(token)" {
+        rejected = true
+        reply(context, status: .unauthorized)
+      } else if head.headers.first(name: "Content-Type")?.lowercased().split(separator: ";").first
+        != "application/json"
+      {
+        rejected = true
+        reply(context, status: .unsupportedMediaType)
+      }
+    case .body(let buffer):
+      guard !rejected else { return }
+      guard body.count + buffer.readableBytes <= 1024 * 1024 else {
+        rejected = true
+        reply(context, status: .payloadTooLarge)
+        return
+      }
+      body.append(contentsOf: buffer.readableBytesView)
+    case .end:
+      guard !rejected, head != nil else { return }
+      let request = body
+      head = nil
+      body = Data()
+      let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+      let dispatcher = dispatcher
+      Task {
+        let response = await dispatcher.handle(request)
+        let stopping = await dispatcher.stopping
+        let shuttingDown = containsRPCShutdown(request) && stopping
+        bound.eventLoop.execute { [self] in
+          reply(
+            bound.value, status: response == nil ? .noContent : .ok, body: response ?? Data(),
+            afterFlush: shuttingDown ? onShutdown : nil)
+        }
+      }
+    }
+  }
+
+  private func reply(
+    _ context: ChannelHandlerContext, status: HTTPResponseStatus, body: Data = Data(),
+    afterFlush: (@Sendable () -> Void)? = nil
+  ) {
+    var headers = HTTPHeaders()
+    headers.add(name: "Content-Type", value: "application/json")
+    headers.add(name: "Content-Length", value: String(body.count))
+    headers.add(name: "Connection", value: "close")
+    context.write(
+      wrapOutboundOut(.head(HTTPResponseHead(version: .http1_1, status: status, headers: headers))),
+      promise: nil)
+    if !body.isEmpty {
+      var buffer = context.channel.allocator.buffer(capacity: body.count)
+      buffer.writeBytes(body)
+      context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+    }
+    let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
+    context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+      bound.value.close(promise: nil)
+      afterFlush?()
+    }
+  }
+
+  func errorCaught(context: ChannelHandlerContext, error: any Error) { context.close(promise: nil) }
+}
