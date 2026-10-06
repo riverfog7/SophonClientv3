@@ -5,12 +5,15 @@ final class ChunkWriteCoordinator: Sendable {
   private let workers: [ChunkWriteWorker]
   private let tracker: FileCompletionTracker
   private let reporter: InstallationReporter?
+  private let fileWorkers: [URL: Int]
+  private let journal: InstallationJournal?
 
   init(
     plannedFiles: [PlannedFile],
     workerCount: Int,
     maxCachedFileHandles: Int = 512,
-    reporter: InstallationReporter? = nil
+    reporter: InstallationReporter? = nil,
+    journal: InstallationJournal? = nil
   ) throws {
     guard workerCount > 0 else {
       throw SophonClientError.UnknownError(
@@ -25,10 +28,21 @@ final class ChunkWriteCoordinator: Sendable {
     self.workers = try (0..<workerCount).map {
       try ChunkWriteWorker(index: $0, maxCachedFileHandles: maxCachedFileHandles / workerCount)
     }
+    var loads = Array(repeating: UInt64(0), count: workerCount)
+    var fileWorkers: [URL: Int] = [:]
+    for file in plannedFiles.filter({ $0.requiredChunkCount > 0 }).sorted(by: {
+      $0.size == $1.size ? $0.fileURL.path < $1.fileURL.path : $0.size > $1.size
+    }) {
+      let index = loads.indices.min(by: { loads[$0] < loads[$1] }) ?? 0
+      fileWorkers[file.fileURL.standardizedFileURL] = index
+      loads[index] += file.size
+    }
+    self.fileWorkers = fileWorkers
     self.tracker = try FileCompletionTracker(
       plannedFiles: plannedFiles
     )
     self.reporter = reporter
+    self.journal = journal
   }
 
   internal func write(
@@ -37,13 +51,18 @@ final class ChunkWriteCoordinator: Sendable {
     for application in chunk.chunkApplicationInfos {
       try Task.checkCancellation()
 
-      let worker = worker(for: application.fileURL)
+      let worker = try worker(for: application.fileURL)
       try await worker.run(
         ChunkWriteRequest(
           data: chunk.data,
           applicationInfo: application
         )
       )
+      if let journal {
+        try await runTransferIO(checkCancellation: false) {
+          try journal.written(chunkID: chunk.chunkID, application: application)
+        }
+      }
       await reporter?.record(
         .chunkWritten(
           filePath: application.fileURL, chunkID: chunk.chunkID,
@@ -70,11 +89,10 @@ final class ChunkWriteCoordinator: Sendable {
 
   private func worker(
     for fileURL: URL
-  ) -> ChunkWriteWorker {
-    let path = fileURL.standardizedFileURL.path
-    let hash = UInt(bitPattern: path.hashValue)
-    let index = Int(hash % UInt(workers.count))
-
+  ) throws -> ChunkWriteWorker {
+    guard let index = fileWorkers[fileURL.standardizedFileURL] else {
+      throw SophonClientError.UnknownError("File is missing from the write plan: \(fileURL.path)")
+    }
     return workers[index]
   }
 

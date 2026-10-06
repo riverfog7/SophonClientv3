@@ -22,12 +22,12 @@ final class Installer: Sendable {
     baseGameDir: URL, maxCocurrentChecks: Int, maxCocurrentDownloads: Int,
     maxCocurrentPostProcessors: Int, maxCocurrentWrites: Int, session: URLSession = .shared,
     maxRetries: Int = 10,
-    retryInterval: Int = 5, maxCachedFileHandles: Int = 512
+    retryInterval: Int = 5, maxCachedFileHandles: Int = 512, downloadCache: DownloadCache? = nil
   ) throws {
     self.baseGameDir = baseGameDir
     self.checker = ChunkCheckWorker(baseGameDir: self.baseGameDir)
     self.downloader = DownloadWorker(
-      session: session, maxRetries: maxRetries, retryInterval: retryInterval)
+      session: session, maxRetries: maxRetries, retryInterval: retryInterval, cache: downloadCache)
     self.postProcessor = ChunkPostProcessWorker()
 
     self.maxCocurrentChecks = maxCocurrentChecks
@@ -181,7 +181,12 @@ final class Installer: Sendable {
         }
       }
 
-      let requiredChunks = Array(requiredChunksByID.values)
+      let requiredChunks = requiredChunksByID.values.sorted {
+        let first = $0.chunkApplicationInfos.first!
+        let second = $1.chunkApplicationInfos.first!
+        if first.fileURL != second.fileURL { return first.fileURL.path < second.fileURL.path }
+        return first.offset < second.offset
+      }
       let downloadSize = requiredChunks.reduce(0) {
         $0 + ($1.downloadInfo.compression ? $1.compressedSize : $1.uncompressedSize)
       }
@@ -236,20 +241,33 @@ final class Installer: Sendable {
 
   internal func install(
     installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
-    reporter: InstallationReporter? = nil
+    reporter: InstallationReporter? = nil,
+    finishReport: Bool = true
   )
     async throws
   {
     do {
-      try Task.checkCancellation()
-
       let plan = try await scan(installInfos: installInfos, reporter: reporter)
+      try await install(plan, reporter: reporter, finishReport: finishReport)
+    } catch {
+      await reporter?.record(
+        .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
+      throw error
+    }
+  }
+
+  internal func install(
+    _ plan: InstallationPlan, reporter: InstallationReporter? = nil,
+    journal: InstallationJournal? = nil, finishReport: Bool = true
+  ) async throws {
+    do {
+      try Task.checkCancellation()
       await reporter?.record(.phaseChanged(.trimming))
-      try await trimFiles(plan: plan, reporter: reporter)
+      try await trimFiles(plan: plan, reporter: reporter, journal: journal)
       try Task.checkCancellation()
 
-      try await execute(plan, reporter: reporter)
-      await reporter?.record(.finished(.completed))
+      try await execute(plan, reporter: reporter, journal: journal)
+      if finishReport { await reporter?.record(.finished(.completed)) }
     } catch {
       if error is CancellationError || Task.isCancelled {
         await reporter?.record(.finished(.cancelled))
@@ -262,7 +280,8 @@ final class Installer: Sendable {
 
   private func trimFiles(
     plan: InstallationPlan,
-    reporter: InstallationReporter? = nil
+    reporter: InstallationReporter? = nil,
+    journal: InstallationJournal? = nil
   ) async throws {
     for file in plan.trimFiles {
       try Task.checkCancellation()
@@ -271,10 +290,10 @@ final class Installer: Sendable {
       let handle = try FileHandle(forWritingTo: fileURL)
       do {
         let currentSize = try handle.seekToEnd()
-        guard currentSize > file.size else {
+        guard currentSize >= file.size else {
           throw SophonClientError.UnknownError(
             """
-            File marked for trimming is not oversized
+            File became shorter than the saved trimming plan
             path: \(fileURL.path)
             expected maximum: \(file.size)
             actual: \(currentSize)
@@ -282,8 +301,9 @@ final class Installer: Sendable {
           )
         }
 
-        try handle.truncate(atOffset: file.size)
+        if currentSize > file.size { try handle.truncate(atOffset: file.size) }
         try handle.close()
+        try await runTransferIO(checkCancellation: false) { try journal?.trimmed(fileURL) }
         await reporter?.record(.fileTrimmed(filePath: fileURL))
         if file.requiredChunkCount == 0 {
           await reporter?.record(.fileCompleted(filePath: fileURL))
@@ -297,7 +317,8 @@ final class Installer: Sendable {
 
   internal func execute(
     _ plan: InstallationPlan,
-    reporter: InstallationReporter? = nil
+    reporter: InstallationReporter? = nil,
+    journal: InstallationJournal? = nil
   ) async throws {
     await reporter?.record(.phaseChanged(.running))
     let requiredChunks = AsyncChannel<RequiredChunk>()
@@ -308,7 +329,7 @@ final class Installer: Sendable {
       plannedFiles: plan.plannedFiles,
       workerCount: maxCocurrentWrites,
       maxCachedFileHandles: maxCachedFileHandles,
-      reporter: reporter
+      reporter: reporter, journal: journal
     )
 
     do {
