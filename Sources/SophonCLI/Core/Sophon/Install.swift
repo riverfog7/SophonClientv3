@@ -69,6 +69,8 @@ struct InstallCLI: AsyncParsableCommand, Sendable {
   @Option(help: "Maximum concurrent disk writers.")
   var maxConcurrentWrites = 4
 
+  @OptionGroup var transfer: TransferCLIOptions
+
   @Option(
     help: "Optional library log file. Normal library stdout logging is always disabled.",
     completion: .file())
@@ -206,7 +208,7 @@ struct InstallCLI: AsyncParsableCommand, Sendable {
         gameID: config.game.id, manifestCacheDir: cacheURL.path, logStdout: false, logFile: logFile,
         maxCocurrentChecks: maxConcurrentChecks, maxCocurrentDownloads: maxConcurrentDownloads,
         maxCocurrentPostProcessors: maxConcurrentPostProcessors,
-        maxCocurrentWrites: maxConcurrentWrites)
+        maxCocurrentWrites: maxConcurrentWrites, transfer: transfer.settings)
       let client = try await SophonClientv3(settings, baseGameDir: URL(fileURLWithPath: directory))
       try Task.checkCancellation()
       let reporter = client.makeInstallationReporter()
@@ -777,7 +779,7 @@ private final class InstallTerminal: @unchecked Sendable {
   }
 }
 
-private final class InstallInterrupts {
+final class InstallInterrupts {
   #if os(Windows)
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cancel: (@Sendable () -> Void)?
@@ -799,20 +801,28 @@ private final class InstallInterrupts {
     }
   #else
     private let source: DispatchSourceSignal
+    private let termSource: DispatchSourceSignal
     private let previous: (@convention(c) (Int32) -> Void)?
+    private let previousTerm: (@convention(c) (Int32) -> Void)?
     private let previousPipe: (@convention(c) (Int32) -> Void)?
 
     init(_ action: @escaping @Sendable () -> Void) {
       previous = signal(SIGINT, SIG_IGN)
+      previousTerm = signal(SIGTERM, SIG_IGN)
       previousPipe = signal(SIGPIPE, SIG_IGN)
       source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+      termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
       source.setEventHandler(handler: action)
+      termSource.setEventHandler(handler: action)
       source.activate()
+      termSource.activate()
     }
 
     deinit {
       source.cancel()
+      termSource.cancel()
       signal(SIGINT, previous)
+      signal(SIGTERM, previousTerm)
       signal(SIGPIPE, previousPipe)
     }
   #endif
