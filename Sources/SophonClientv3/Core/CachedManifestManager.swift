@@ -88,11 +88,7 @@ final class CachedManifestManager: Sendable {
   internal func writeCache(key: String, data: Data) throws {
     // key should be cache data md5
     let targetPath = self.manifestCacheDir.appendingPathComponent(key)
-
-    if FileManager.default.fileExists(atPath: targetPath.path) {
-      try FileManager.default.removeItem(at: targetPath)
-    }
-    try data.write(to: targetPath)
+    try data.write(to: targetPath, options: .atomic)
   }
 
   private func _getManifest<Message: SwiftProtobuf.Message>(
@@ -200,5 +196,38 @@ final class CachedManifestManager: Sendable {
       manifest: sophonPatchManifestInfo.manifest,
       downloadInfo: sophonPatchManifestInfo.manifestDownload)
     return (manifest, sophonPatchManifestInfo.diffDownload)
+  }
+
+  internal func getUpdateInfos(matchingFields: Set<String>, predownload: Bool) async throws -> (
+    install: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
+    update: [(manifest: DiffManifest, diffDownloadInfo: SophonDownloadInfo)]
+  ) {
+    let branch = try getGameSubbranch(predownload: predownload)
+    async let installation = apiClient.getSophonBuildInfo(branch)
+    async let update = apiClient.getSophonPatchBuildInfo(branch)
+    let builds = try await (installation, update)
+    return try await withThrowingTaskGroup(
+      of: (Manifest, SophonDownloadInfo, DiffManifest, SophonDownloadInfo).self
+    ) { group in
+      for field in matchingFields {
+        guard let installInfo = builds.0.find(field), let updateInfo = builds.1.find(field) else {
+          throw SophonClientError.InvalidManifestMatchingFieldError(field)
+        }
+        group.addTask { [self] in
+          let installation: Manifest = try await _getManifest(
+            manifest: installInfo.manifest, downloadInfo: installInfo.manifestDownload)
+          let update: DiffManifest = try await _getManifest(
+            manifest: updateInfo.manifest, downloadInfo: updateInfo.manifestDownload)
+          return (installation, installInfo.chunkDownload, update, updateInfo.diffDownload)
+        }
+      }
+      var install: [(Manifest, SophonDownloadInfo)] = []
+      var update: [(DiffManifest, SophonDownloadInfo)] = []
+      for try await result in group {
+        install.append((result.0, result.1))
+        update.append((result.2, result.3))
+      }
+      return (install, update)
+    }
   }
 }
