@@ -103,13 +103,15 @@ public final class SophonClientv3: @unchecked Sendable {
   }
 
   public func planUpdate(
-    sourceVersion: String, mode: GameBranchCategoryScenario = .full, predownload: Bool = false
+    sourceVersion: String? = nil, mode: GameBranchCategoryScenario = .full,
+    predownload: Bool = false
   ) async throws -> UpdatePlan {
     guard gameLaunchConfig.enableLdiff else {
       throw SophonClientError.UnsupportedManifestConfiguration(
         "This game does not support incremental patches")
     }
-    let branch = try manifestManager.getGameSubbranch(predownload: predownload)
+    let branch = try await selectedBranch(predownload: predownload)
+    let sourceVersion = try await updateSourceVersion(sourceVersion)
     if sourceVersion == branch.tag {
       return UpdatePlan(
         sourceVersion: sourceVersion, targetVersion: branch.tag, patchBundles: [], installFiles: [],
@@ -119,36 +121,57 @@ public final class SophonClientv3: @unchecked Sendable {
       throw SophonClientError.UnsupportedManifestConfiguration(
         "No update from \(sourceVersion) to \(branch.tag) is available")
     }
-    let fields = try await getRequiredMatchingFields(mode: mode, predownload: predownload)
+    let fields = try await getRequiredMatchingFields(
+      mode: mode, predownload: predownload, selectedBranch: branch)
     let infos = try await manifestManager.getUpdateInfos(
-      matchingFields: fields, predownload: predownload)
+      matchingFields: fields, branch: branch)
     return try updater.makePlan(
       sourceVersion: sourceVersion, targetVersion: branch.tag,
       installInfos: infos.install, updateInfos: infos.update)
   }
 
   public func update(
-    sourceVersion: String, mode: GameBranchCategoryScenario = .full, reporter: UpdateReporter? = nil
+    sourceVersion: String? = nil, mode: GameBranchCategoryScenario = .full,
+    predownload: Bool = false, cacheOnly: Bool = false, reporter: UpdateReporter? = nil
   ) async throws {
     let reporter = reporter ?? makeUpdateReporter()
     do {
       await reporter.record(.phaseChanged(.metadata))
+      let branch = try await selectedBranch(predownload: predownload)
       let saved =
         transferSettings.preserveState
         ? try await Self.savedUpdateState(at: baseGameDir, settings: transferSettings) : nil
+      let detectedSource: String?
+      if let sourceVersion {
+        detectedSource = sourceVersion
+      } else if saved?.cacheOnly == true {
+        detectedSource = try await detectInstalledVersion().version
+      } else {
+        detectedSource = nil
+      }
       let plan: UpdatePlan
-      if let saved, !saved.finished {
-        guard saved.plan.sourceVersion == sourceVersion else {
-          throw SophonClientError.UnknownError(
-            "Resume the unfinished update from \(saved.plan.sourceVersion) first")
+      if let saved, !saved.finished || saved.cacheOnly, saved.gameID == gameID,
+        saved.mode == mode, saved.plan.targetVersion == branch.tag,
+        saved.predownload == predownload || saved.cacheOnly,
+        !saved.cacheOnly ? !cacheOnly : true,
+        !saved.cacheOnly || detectedSource == nil || detectedSource == saved.plan.sourceVersion
+      {
+        guard sourceVersion == nil || sourceVersion == saved.plan.sourceVersion else {
+          throw SophonClientError.UnknownError("The source version conflicts with the saved update")
         }
         plan = saved.plan
       } else {
-        plan = try await planUpdate(sourceVersion: sourceVersion, mode: mode)
+        if let saved, !saved.finished, !saved.cacheOnly {
+          throw SophonClientError.UnknownError(
+            "Reconcile the unfinished update using the installation manifest")
+        }
+        plan = try await planUpdate(
+          sourceVersion: detectedSource, mode: mode, predownload: predownload)
       }
       try await updater.execute(
         plan, settings: transferSettings, downloadCache: downloadCache, installer: installer,
-        reporter: reporter)
+        reporter: reporter, cacheOnly: cacheOnly, gameID: gameID, mode: mode,
+        predownload: predownload)
     } catch {
       await reporter.record(
         .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
@@ -156,21 +179,79 @@ public final class SophonClientv3: @unchecked Sendable {
     }
   }
 
-  public func predownload(
-    sourceVersion: String, mode: GameBranchCategoryScenario = .full,
-    futureBranch: Bool = true, reporter: UpdateReporter? = nil
-  ) async throws {
-    let reporter = reporter ?? makeUpdateReporter()
-    do {
-      let plan = try await planUpdate(
-        sourceVersion: sourceVersion, mode: mode, predownload: futureBranch)
-      try await updater.predownload(
-        plan, settings: transferSettings, downloadCache: downloadCache, reporter: reporter)
-    } catch {
-      await reporter.record(
-        .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
-      throw error
+  private func selectedBranch(predownload: Bool) async throws -> GameSubBranch {
+    let branches = try await manifestManager.apiClient.getGameBranches()
+    guard let branch = branches.getGameSubBranch(id: gameID, predownload: predownload) else {
+      if predownload { throw SophonClientError.PredownloadNotAvailableError }
+      throw SophonClientError.UnknownError("The live branch is unavailable")
     }
+    return branch
+  }
+
+  private func updateSourceVersion(_ override: String?) async throws -> String {
+    if let override, !override.isEmpty { return override }
+    if let version = try await detectInstalledVersion().version { return version }
+    throw SophonClientError.UnknownError(
+      "Cannot determine the installed version; supply --from or verify with install")
+  }
+
+  public func detectInstalledVersion() async throws -> InstalledVersion {
+    let executable = baseGameDir.appendingPathComponent(gameLaunchConfig.exeFileName)
+    async let records = manifestManager.apiClient.getGameScanInfo()
+    let digest = try await runTransferIO { try digestFile(executable) }
+    let install = try await Self.savedInstallationState(at: baseGameDir, settings: transferSettings)
+    let update = try await Self.savedUpdateState(at: baseGameDir, settings: transferSettings)
+    let completedVersion =
+      update.flatMap {
+        $0.gameID == gameID && $0.finished && !$0.cacheOnly ? $0.plan.targetVersion : nil
+      } ?? install.flatMap { $0.gameID == gameID && $0.finished ? $0.version : nil }
+    return resolveInstalledVersion(
+      md5: digest?.md5, gameID: gameID, records: try await records,
+      completedVersion: completedVersion)
+  }
+
+  public func nextAction() async throws -> GameAction {
+    let branches = try await manifestManager.apiClient.getGameBranches()
+    guard let live = branches.getGameSubBranch(id: gameID, predownload: false) else {
+      throw SophonClientError.UnknownError("The live branch is unavailable")
+    }
+    let future = branches.getGameSubBranch(id: gameID, predownload: true)
+    let installation = try await Self.savedInstallationState(
+      at: baseGameDir, settings: transferSettings)
+    let update = try await Self.savedUpdateState(at: baseGameDir, settings: transferSettings)
+    let ownInstall = installation.flatMap { $0.gameID == gameID ? $0 : nil }
+    let ownUpdate = update.flatMap { $0.gameID == gameID ? $0 : nil }
+    // Unfinished writes are authoritative even when the executable was updated before other files.
+    let pendingWrite =
+      ownInstall?.finished == false
+      || (ownUpdate?.finished == false && ownUpdate?.cacheOnly == false)
+    let installed =
+      pendingWrite
+      ? InstalledVersion(version: nil, executableMD5: nil, candidates: [])
+      : try await detectInstalledVersion()
+    let futureCached: Bool
+    if let state = ownUpdate, state.cacheOnly, state.finished,
+      state.plan.sourceVersion == installed.version, state.plan.targetVersion == future?.tag
+    {
+      futureCached = try await cachedUpdateAvailable(state)
+    } else {
+      futureCached = false
+    }
+    return decideGameAction(
+      installed: installed, live: live, future: future,
+      installation: ownInstall, update: ownUpdate, futureCached: futureCached)
+  }
+
+  private func cachedUpdateAvailable(_ state: SavedUpdateState) async throws -> Bool {
+    for bundle in state.plan.patchBundles {
+      if try await !downloadCache.contains(bundle.downloadRequest()) { return false }
+    }
+    for file in state.plan.installFiles where state.files[file.fileURL.path] == .cachedRepair {
+      for chunk in file.installChunks {
+        if try await !downloadCache.contains(chunk.downloadRequest()) { return false }
+      }
+    }
+    return true
   }
 
   public static func savedUpdateState(
@@ -282,16 +363,19 @@ public final class SophonClientv3: @unchecked Sendable {
 
   private func getRequiredMatchingFields(
     mode: GameBranchCategoryScenario, additionalVoicePackMatchingFields: Set<String> = [],
-    predownload: Bool = false
+    predownload: Bool = false, selectedBranch: GameSubBranch? = nil
   ) async throws -> Set<String> {
     let packageScenarioSupported = gameLaunchConfig.enableScenarioPkg
     if !packageScenarioSupported && mode != .full {
       throw SophonClientError.GameScenarioUnsupportedError(gameID: gameID, gameBiz: gameBiz)
     }
 
-    let branch = try manifestManager.getGameSubbranch(
-      predownload: predownload
-    )
+    let branch: GameSubBranch
+    if let selectedBranch {
+      branch = selectedBranch
+    } else {
+      branch = try manifestManager.getGameSubbranch(predownload: predownload)
+    }
     let resources = branch.getGameBranchCategories(
       categoryScenario: mode,
       categoryType: .resource
@@ -352,7 +436,11 @@ public final class SophonClientv3: @unchecked Sendable {
       let updateDirectory = UpdateJournal.directory(
         settings: transferSettings, gameDirectory: baseGameDir)
       let update = try await runTransferIO { try UpdateJournal.load(directory: updateDirectory) }
-      guard update?.finished != false else {
+      let liveTarget = try await selectedBranch(predownload: predownload).tag
+      guard
+        update?.finished != false || update?.cacheOnly == true
+          || update?.plan.targetVersion != liveTarget
+      else {
         throw SophonClientError.UnknownError(
           "Resume the unfinished update before starting an installation")
       }
@@ -366,7 +454,7 @@ public final class SophonClientv3: @unchecked Sendable {
         ? try await runTransferIO { try InstallationJournal.load(directory: directory) } : nil
       let plan: InstallationPlan
       let journal: InstallationJournal?
-      if let saved, !saved.finished {
+      if let saved, !saved.finished, saved.version == liveTarget {
         guard saved.gameID == gameID, saved.mode == mode, saved.predownload == predownload,
           saved.voicePacks == additionalVoicePackMatchingFields.sorted()
         else {
@@ -401,6 +489,10 @@ public final class SophonClientv3: @unchecked Sendable {
         }
       }
 
+      // A live installation plan reconciles an obsolete partially applied update.
+      if let update, !update.finished, !update.cacheOnly, update.plan.targetVersion != liveTarget {
+        try await runTransferIO { try removeOwnedFile(updateDirectory) }
+      }
       try Task.checkCancellation()
       try await installer.install(
         plan, reporter: reporter, journal: journal, finishReport: false)

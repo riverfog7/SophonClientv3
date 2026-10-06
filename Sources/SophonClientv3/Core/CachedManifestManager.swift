@@ -198,11 +198,10 @@ final class CachedManifestManager: Sendable {
     return (manifest, sophonPatchManifestInfo.diffDownload)
   }
 
-  internal func getUpdateInfos(matchingFields: Set<String>, predownload: Bool) async throws -> (
+  internal func getUpdateInfos(matchingFields: Set<String>, branch: GameSubBranch) async throws -> (
     install: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
     update: [(manifest: DiffManifest, diffDownloadInfo: SophonDownloadInfo)]
   ) {
-    let branch = try getGameSubbranch(predownload: predownload)
     async let installation = apiClient.getSophonBuildInfo(branch)
     async let update = apiClient.getSophonPatchBuildInfo(branch)
     let builds = try await (installation, update)
