@@ -44,9 +44,17 @@ public struct SophonDownloadInfo: Codable, Sendable {
 
   public init(from decoder: any Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    self.encryption = (try container.decode(Int.self, forKey: .encryption)) == 0 ? false : true
+    if let flag = try? container.decode(Bool.self, forKey: .encryption) {
+      self.encryption = flag
+    } else {
+      self.encryption = try container.decode(Int.self, forKey: .encryption) != 0
+    }
     self.password = try container.decode(String.self, forKey: .password)
-    self.compression = (try container.decode(Int.self, forKey: .compression)) == 0 ? false : true
+    if let flag = try? container.decode(Bool.self, forKey: .compression) {
+      self.compression = flag
+    } else {
+      self.compression = try container.decode(Int.self, forKey: .compression) != 0
+    }
     self.urlPrefix = try container.decode(String.self, forKey: .urlPrefix)
     let _ = try parseURL(urlPrefix)
     self.urlSuffix = try container.decode(String.self, forKey: .urlSuffix)

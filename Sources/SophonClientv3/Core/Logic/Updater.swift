@@ -22,6 +22,7 @@ final class Updater: Sendable {
 
   internal func makePlan(
     sourceVersion: String,
+    targetVersion: String = "",
     installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
     updateInfos: [(manifest: DiffManifest, diffDownloadInfo: SophonDownloadInfo)],
   ) throws -> UpdatePlan {
@@ -45,7 +46,8 @@ final class Updater: Sendable {
       retainedNames: Set(installFilesByName.keys))
 
     return UpdatePlan(
-      sourceVersion: sourceVersion, patchBundles: patchBundles, installFiles: installFiles,
+      sourceVersion: sourceVersion, targetVersion: targetVersion,
+      patchBundles: patchBundles, installFiles: installFiles,
       deleteFiles: deleteFiles)
   }
 

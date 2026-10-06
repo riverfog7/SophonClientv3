@@ -5,19 +5,19 @@ import HYPAPIClient
   import FoundationNetworking
 #endif
 
-struct ChunkApplicationInfo: Sendable {
-  let fileURL: URL
-  let offset: UInt64
+public struct ChunkApplicationInfo: Sendable, Codable {
+  public let fileURL: URL
+  public let offset: UInt64
 }
 
-struct RequiredChunk: Sendable {
-  let chunkID: String
-  let uncompressedMd5: String
-  let compressedMd5: String
-  let compressedSize: UInt64
-  let uncompressedSize: UInt64
-  let downloadInfo: SophonDownloadInfo
-  var chunkApplicationInfos: [ChunkApplicationInfo]
+public struct RequiredChunk: Sendable, Codable {
+  public let chunkID: String
+  public let uncompressedMd5: String
+  public let compressedMd5: String
+  public let compressedSize: UInt64
+  public let uncompressedSize: UInt64
+  public let downloadInfo: SophonDownloadInfo
+  public var chunkApplicationInfos: [ChunkApplicationInfo]
 
   internal func getDownloadURL() throws -> URL {
     return try downloadInfo.buildDownloadURL(chunkID)
@@ -39,23 +39,23 @@ struct ProcessedChunk: Sendable {
   let chunkApplicationInfos: [ChunkApplicationInfo]
 }
 
-struct InstallationPlan: Sendable {
-  let totalChunkCount: Int
-  let downloadSize: UInt64
-  let diskWriteSize: UInt64
-  let requiredChunks: [RequiredChunk]
-  let plannedFiles: [PlannedFile]
+public struct InstallationPlan: Sendable, Codable {
+  public let totalChunkCount: Int
+  public let downloadSize: UInt64
+  public let diskWriteSize: UInt64
+  public let requiredChunks: [RequiredChunk]
+  public let plannedFiles: [PlannedFile]
   var trimFiles: LazyFilterSequence<[PlannedFile]> {
     plannedFiles.lazy.filter { $0.needsTrimming }
   }
 }
 
-struct PlannedFile: Sendable {
-  let fileURL: URL
-  let size: UInt64
-  let md5: String
-  let requiredChunkCount: Int
-  let needsTrimming: Bool
+public struct PlannedFile: Sendable, Codable {
+  public let fileURL: URL
+  public let size: UInt64
+  public let md5: String
+  public let requiredChunkCount: Int
+  public let needsTrimming: Bool
 }
 
 struct ScanJob: Sendable {

@@ -1,6 +1,6 @@
 import Logging
 
-public struct SophonClientSettings: Codable {
+public struct SophonClientSettings: Codable, Sendable {
   public let baseURL: String
   public let sophonBaseURL: String
   public var maxRetries: Int
@@ -17,6 +17,7 @@ public struct SophonClientSettings: Codable {
   public var maxCocurrentPostProcessors: Int
   public var maxCocurrentWrites: Int
   public var maxCachedFileHandles: Int
+  public var transfer: TransferSettings
 
   public init(
     baseURL: String, sophonBaseURL: String, maxRetries: Int = 10, retryInterval: Int = 5,
@@ -24,7 +25,7 @@ public struct SophonClientSettings: Codable {
     logStdout: Bool = true, logFile: String? = nil, logLevel: Logger.Level = .info,
     maxCocurrentChecks: Int = 8, maxCocurrentDownloads: Int = 8,
     maxCocurrentPostProcessors: Int = 4, maxCocurrentWrites: Int = 4,
-    maxCachedFileHandles: Int = 512
+    maxCachedFileHandles: Int = 512, transfer: TransferSettings = TransferSettings()
   ) {
     self.baseURL = baseURL
     self.sophonBaseURL = sophonBaseURL
@@ -41,6 +42,7 @@ public struct SophonClientSettings: Codable {
     self.maxCocurrentPostProcessors = maxCocurrentPostProcessors
     self.maxCocurrentWrites = maxCocurrentWrites
     self.maxCachedFileHandles = maxCachedFileHandles
+    self.transfer = transfer
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -48,6 +50,7 @@ public struct SophonClientSettings: Codable {
     case logStdout, logFile, logLevel
     case maxCocurrentChecks, maxCocurrentDownloads, maxCocurrentPostProcessors, maxCocurrentWrites
     case maxCachedFileHandles
+    case transfer
   }
 
   public init(from decoder: any Decoder) throws {
@@ -77,5 +80,6 @@ public struct SophonClientSettings: Codable {
       try container.decodeIfPresent(Int.self, forKey: .maxCocurrentWrites) ?? maxCocurrentWrites
     maxCachedFileHandles =
       try container.decodeIfPresent(Int.self, forKey: .maxCachedFileHandles) ?? maxCachedFileHandles
+    transfer = try container.decodeIfPresent(TransferSettings.self, forKey: .transfer) ?? transfer
   }
 }
