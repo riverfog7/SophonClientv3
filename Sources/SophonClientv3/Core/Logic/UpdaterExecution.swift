@@ -323,7 +323,8 @@ private final class UpdateExecution: Sendable {
             temporary: paths.temporary, target: target.fileURL, backup: paths.backup)
           return true
         }
-        if journal?.stage(of: target.fileURL) != nil,
+        if let stage = journal?.stage(of: target.fileURL),
+          [.writing, .repair, .cachedRepair].contains(stage),
           let digest = try digestFile(target.fileURL),
           digest.size == target.size, digest.md5 == target.md5.lowercased()
         {

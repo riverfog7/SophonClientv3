@@ -89,6 +89,14 @@ internal func decideGameAction(
       reason:
         "The executable version is unknown or ambiguous; verify using the installation manifest")
   }
+  if let update, !update.finished, update.cacheOnly, update.plan.sourceVersion == source,
+    update.plan.targetVersion == (update.predownload ? future?.tag : live.tag)
+  {
+    return GameAction(
+      .resumeUpdate, source: source, target: update.plan.targetVersion,
+      predownload: update.predownload, cacheOnly: true, mode: update.mode,
+      reason: "Resume the saved cache-only update")
+  }
   if source != live.tag {
     if source == future?.tag {
       return GameAction(
@@ -105,14 +113,6 @@ internal func decideGameAction(
       reason: "No direct update is advertised; use the installation manifest")
   }
   if let future, future.tag != live.tag, future.diffTags.contains(source), !futureCached {
-    if let update, !update.finished, update.cacheOnly, update.predownload,
-      update.plan.sourceVersion == source, update.plan.targetVersion == future.tag
-    {
-      return GameAction(
-        .resumeUpdate, source: source, target: future.tag,
-        predownload: true, cacheOnly: true, mode: update.mode,
-        reason: "Resume caching the future update")
-    }
     return GameAction(
       .cacheUpdate, source: source, target: future.tag,
       predownload: true, cacheOnly: true, reason: "Cache the available future update")

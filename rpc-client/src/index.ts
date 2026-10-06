@@ -153,7 +153,10 @@ export class SophonRpcClient {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closed) {
+      if (this.child) { this.child.stdin.end(); await this.exit; }
+      return;
+    }
     if (this.child) {
       try { await this.call("rpc.shutdown"); }
       finally { this.child.stdin.end(); await this.exit; }
