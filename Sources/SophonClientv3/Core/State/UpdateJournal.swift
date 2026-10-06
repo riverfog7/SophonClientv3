@@ -1,12 +1,19 @@
 import Foundation
+import HYPAPIClient
 
 public enum UpdateFileStage: String, Codable, Sendable {
   case writing
   case repair
   case completed
+  case cachedPatch
+  case cachedRepair
 }
 
 public struct SavedUpdateState: Codable, Sendable {
+  public let gameID: String
+  public let mode: GameBranchCategoryScenario
+  public let predownload: Bool
+  public let cacheOnly: Bool
   public let plan: UpdatePlan
   public let files: [String: UpdateFileStage]
   public let finished: Bool
@@ -25,27 +32,39 @@ final class UpdateJournal: @unchecked Sendable {
   private var files: [String: UpdateFileStage]
   let plan: UpdatePlan
 
-  init(directory: URL, plan: UpdatePlan) throws {
+  init(
+    directory: URL, plan: UpdatePlan, gameID: String = "", mode: GameBranchCategoryScenario = .full,
+    predownload: Bool = false, cacheOnly: Bool = false
+  ) throws {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let planURL = directory.appendingPathComponent("plan.json")
     let eventsURL = directory.appendingPathComponent("events.jsonl")
     let saved = try Self.load(directory: directory)
-    let planData = try JSONEncoder().encode(plan)
-    if let saved, !saved.finished {
-      guard saved.plan.sourceVersion == plan.sourceVersion,
-        saved.plan.targetVersion == plan.targetVersion
-      else {
-        throw SophonClientError.UnknownError(
-          "An unfinished update must be resumed before starting another")
-      }
+    let canResume =
+      saved.map {
+        $0.gameID == gameID && $0.mode == mode && $0.plan.sourceVersion == plan.sourceVersion
+          && $0.plan.targetVersion == plan.targetVersion
+          && ($0.predownload == predownload || $0.cacheOnly)
+          && (!$0.cacheOnly ? !cacheOnly : true)
+      } ?? false
+    if let saved, !saved.finished, !saved.cacheOnly, !canResume {
+      throw SophonClientError.UnknownError(
+        "An unfinished update must be resumed or reconciled before starting another")
+    }
+    if let saved, canResume, !saved.finished || saved.cacheOnly {
       self.plan = saved.plan
       files = saved.files
     } else {
-      try planData.write(to: planURL, options: .atomic)
-      try Data().write(to: eventsURL, options: .atomic)
       self.plan = plan
       files = [:]
     }
+    // Reset receipts before the new snapshot. A kill between these writes can repeat work,
+    // but cannot carry an old finished record into a new execution mode.
+    try Data().write(to: eventsURL, options: .atomic)
+    let state = SavedUpdateState(
+      gameID: gameID, mode: mode, predownload: predownload, cacheOnly: cacheOnly,
+      plan: self.plan, files: files, finished: false)
+    try JSONEncoder().encode(state).write(to: planURL, options: .atomic)
     handle = try FileHandle(forUpdating: eventsURL)
     let events = try Data(contentsOf: eventsURL)
     let validLength = events.lastIndex(of: 10).map { $0 + 1 } ?? 0
@@ -66,20 +85,22 @@ final class UpdateJournal: @unchecked Sendable {
       if isMissingFile(error) { return nil }
       throw error
     }
-    let plan = try JSONDecoder().decode(UpdatePlan.self, from: data)
+    let initial = try JSONDecoder().decode(SavedUpdateState.self, from: data)
     let events: Data
     do { events = try Data(contentsOf: eventsURL) } catch {
-      if isMissingFile(error) { return SavedUpdateState(plan: plan, files: [:], finished: false) }
+      if isMissingFile(error) { return initial }
       throw error
     }
-    var files: [String: UpdateFileStage] = [:]
-    var finished = false
+    var files = initial.files
+    var finished = initial.finished
     for line in events.split(separator: 10, omittingEmptySubsequences: false).dropLast() {
       let record = try JSONDecoder().decode(Record.self, from: Data(line))
       if let path = record.path, let stage = record.stage { files[path] = stage }
       if record.finished == true { finished = true }
     }
-    return SavedUpdateState(plan: plan, files: files, finished: finished)
+    return SavedUpdateState(
+      gameID: initial.gameID, mode: initial.mode, predownload: initial.predownload,
+      cacheOnly: initial.cacheOnly, plan: initial.plan, files: files, finished: finished)
   }
 
   func stage(of fileURL: URL) -> UpdateFileStage? {

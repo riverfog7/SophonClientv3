@@ -6,7 +6,7 @@ import Foundation
 
 public enum UpdatePhase: String, Codable, Sendable {
   case metadata
-  case predownloading
+  case caching
   case running
   case repairing
   case deleting
@@ -25,6 +25,7 @@ public enum UpdateEvent: Sendable {
   case bundleDownloaded(patchID: String, bytes: UInt64)
   case fileNeedsRepair(fileURL: URL)
   case fileCompleted(fileURL: URL, bytes: UInt64, skipped: Bool)
+  case fileCached(fileURL: URL)
   case fileDeleted(fileURL: URL, bytes: UInt64)
   case phaseChanged(UpdatePhase)
   case finished(UpdateOutcome)
@@ -41,6 +42,7 @@ public struct UpdateProgress: BaseProgress, Codable {
   public internal(set) var downloadedBytes: UInt64 = 0
   public internal(set) var completedFiles: Int = 0
   public internal(set) var skippedFiles: Int = 0
+  public internal(set) var cachedFiles: Int = 0
   public internal(set) var repairFiles: Int = 0
   public internal(set) var writtenBytes: UInt64 = 0
   public internal(set) var deletedBytes: UInt64 = 0

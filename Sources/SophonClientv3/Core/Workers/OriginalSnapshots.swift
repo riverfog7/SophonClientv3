@@ -15,31 +15,34 @@ actor OriginalSnapshots {
   private let targets: [URL: PlannedUpdateFile]
   private let durableSources: Set<URL>
   private let sharedSources: Set<URL>
+  private let cacheOnly: Bool
   private var references: [String: Int]
   private var tasks: [String: Task<OriginalSnapshot, any Error>] = [:]
   private var diskSizes: [String: UInt64]
 
   init(
     cache: BinaryCache, directory: URL, diskLimit: UInt64, io: WorkLimiter,
-    plan: UpdatePlan, writeMode: UpdateWriteMode, existingSizes: [String: UInt64]
+    plan: UpdatePlan, writeMode: UpdateWriteMode, existingSizes: [String: UInt64],
+    cacheOnly: Bool = false
   ) {
     self.cache = cache
     self.directory = directory
     self.diskLimit = diskLimit
     self.io = io
+    self.cacheOnly = cacheOnly
     targets = Dictionary(uniqueKeysWithValues: plan.installFiles.map { ($0.fileURL, $0) })
     let patches = plan.patchBundles.flatMap(\.patches)
     let targetPaths = Set(plan.installFiles.map(\.fileURL))
     sharedSources = Set(
       patches.compactMap { patch in
-        guard let original = patch.original, targetPaths.contains(original.fileURL),
+        guard !cacheOnly, let original = patch.original, targetPaths.contains(original.fileURL),
           original.fileURL != patch.target.fileURL
         else { return nil }
         return original.fileURL
       })
     durableSources = Set(
       patches.compactMap { patch in
-        guard let original = patch.original else { return nil }
+        guard !cacheOnly, let original = patch.original else { return nil }
         if writeMode == .inPlace
           || (targetPaths.contains(original.fileURL) && original.fileURL != patch.target.fileURL)
         {
@@ -80,7 +83,7 @@ actor OriginalSnapshots {
   func get(_ source: PlannedPatchSource) async throws -> OriginalSnapshot {
     let key = Self.key(source)
     if let task = tasks[key] { return try await task.value }
-    let durable = durableSources.contains(source.fileURL) || diskSizes[key] != nil
+    let durable = !cacheOnly && (durableSources.contains(source.fileURL) || diskSizes[key] != nil)
     if durable {
       let used = diskSizes.values.reduce(UInt64(0), +)
       let extra =
@@ -93,7 +96,7 @@ actor OriginalSnapshots {
     }
     let savedURL = directory.appendingPathComponent(key + ".original")
     let candidate = targets[source.fileURL]
-    let task = Task { [cache, io] in
+    let task = Task { [cache, io, cacheOnly] in
       if durable, let digest = try await runTransferIO({ try digestFile(savedURL) }),
         digest.size == source.size, digest.md5 == source.md5.lowercased()
       {
@@ -101,15 +104,18 @@ actor OriginalSnapshots {
           input: .file(savedURL, offset: 0, size: source.size), observed: digest,
           fromSavedOriginal: true)
       }
-      let writer = durable ? nil : try await cache.makeWriter(expectedSize: source.size)
+      let writer =
+        durable || cacheOnly ? nil : try await cache.makeWriter(expectedSize: source.size)
       do {
         let digest = try await io.withPermit {
           try await Self.capture(
             source, candidate: candidate, writer: writer, savedURL: durable ? savedURL : nil)
         }
         if digest?.size == source.size, digest?.md5 == source.md5.lowercased() {
-          let input: PatchInput
-          if let writer {
+          let input: PatchInput?
+          if cacheOnly {
+            input = nil
+          } else if let writer {
             input = .cached(try await writer.finish())
           } else {
             input = .file(savedURL, offset: 0, size: source.size)
@@ -185,7 +191,7 @@ actor OriginalSnapshots {
     references[key, default: 1] -= 1
     guard references[key] == 0 else { return }
     tasks.removeValue(forKey: key)
-    if diskSizes[key] != nil {
+    if !cacheOnly, diskSizes[key] != nil {
       let fileURL = directory.appendingPathComponent(key + ".original")
       try await runTransferIO(checkCancellation: false) { try removeOwnedFile(fileURL) }
       diskSizes.removeValue(forKey: key)

@@ -22,6 +22,16 @@ public struct RequiredChunk: Sendable, Codable {
   internal func getDownloadURL() throws -> URL {
     return try downloadInfo.buildDownloadURL(chunkID)
   }
+
+  internal func downloadRequest() throws -> DownloadRequest {
+    guard !downloadInfo.encryption, downloadInfo.password.isEmpty else {
+      throw SophonClientError.UnsupportedManifestConfiguration("Encrypted chunks are not supported")
+    }
+    return DownloadRequest(
+      chunkID: chunkID, url: try getDownloadURL(),
+      md5: downloadInfo.compression ? compressedMd5 : uncompressedMd5,
+      size: downloadInfo.compression ? compressedSize : uncompressedSize)
+  }
 }
 
 struct DownloadedChunk: Sendable {

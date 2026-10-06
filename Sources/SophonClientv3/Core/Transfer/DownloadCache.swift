@@ -40,6 +40,21 @@ actor DownloadCache {
 
   deinit { http.invalidate() }
 
+  // Decision checks do not fetch data or change the cache. Usage still verifies MD5.
+  func contains(_ request: DownloadRequest) async throws -> Bool {
+    let key = transferKey("\(request.md5.lowercased()):\(request.size)")
+    let path = DownloadPaths(directory: directory, key: key).ready
+    return try await runTransferIO {
+      do {
+        let size = try path.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        return size.flatMap(UInt64.init(exactly:)) == request.size
+      } catch {
+        if isMissingFile(error) { return false }
+        throw error
+      }
+    }
+  }
+
   func get(_ request: DownloadRequest, waitForSpace: Bool = true) async throws -> CachedDownload {
     try Task.checkCancellation()
     let key = transferKey("\(request.md5.lowercased()):\(request.size)")

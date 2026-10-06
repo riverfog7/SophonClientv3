@@ -1,62 +1,22 @@
 import AsyncAlgorithms
 import Foundation
 import HPatch
+import HYPAPIClient
 
 extension Updater {
   func execute(
     _ plan: UpdatePlan, settings: TransferSettings, downloadCache: DownloadCache,
-    installer: Installer, reporter: UpdateReporter
+    installer: Installer, reporter: UpdateReporter, cacheOnly: Bool = false,
+    gameID: String = "", mode: GameBranchCategoryScenario = .full, predownload: Bool = false
   ) async throws {
     let execution = try await UpdateExecution(
       plan: plan, gameDirectory: baseGameDir, settings: settings, downloadCache: downloadCache,
       installer: installer, downloadWorkers: maxCocurrentDownloads,
-      writeWorkers: maxCocurrentWrites, reporter: reporter)
+      writeWorkers: maxCocurrentWrites, reporter: reporter, cacheOnly: cacheOnly,
+      gameID: gameID, mode: mode, predownload: predownload)
     try await execution.run()
   }
 
-  func predownload(
-    _ plan: UpdatePlan, settings: TransferSettings, downloadCache: DownloadCache,
-    reporter: UpdateReporter
-  ) async throws {
-    guard plan.patchSize <= settings.diskLimit else {
-      throw SophonClientError.UnknownError(
-        "The download cache limit is smaller than the predownload")
-    }
-    await reporter.record(
-      .planned(
-        sourceVersion: plan.sourceVersion, targetVersion: plan.targetVersion,
-        patchBytes: plan.patchSize, installBytes: plan.installSize,
-        totalFiles: plan.installFiles.count))
-    await reporter.record(.phaseChanged(.predownloading))
-    let limit = WorkLimiter(limit: min(maxCocurrentDownloads, settings.entryLimit))
-    do {
-      let downloads = try await withThrowingTaskGroup(of: CachedDownload.self) { group in
-        for bundle in plan.patchBundles {
-          group.addTask {
-            try await limit.withPermit {
-              let request = try bundle.downloadRequest()
-              let download = try await downloadCache.get(request, waitForSpace: false)
-              await reporter.record(
-                .bundleDownloaded(patchID: bundle.patchID, bytes: bundle.patchSize))
-              return download
-            }
-          }
-        }
-        var downloads: [CachedDownload] = []
-        do { while let download = try await group.next() { downloads.append(download) } } catch {
-          group.cancelAll()
-          throw error
-        }
-        return downloads
-      }
-      defer { withExtendedLifetime(downloads) {} }
-      await reporter.record(.finished(.completed))
-    } catch {
-      await reporter.record(
-        .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
-      throw error
-    }
-  }
 }
 
 extension PlannedPatchBundle {
@@ -82,8 +42,15 @@ private actor RepairTargets {
   func all() -> [PlannedUpdateFile] { files.values.sorted { $0.fileURL.path < $1.fileURL.path } }
 }
 
+private actor CachedPayloads {
+  private var downloads: [URL: CachedDownload] = [:]
+  func retain(_ download: CachedDownload) { downloads[download.fileURL] = download }
+}
+
 private final class UpdateExecution: Sendable {
   private let plan: UpdatePlan
+  private let cacheOnly: Bool
+  private let cachedPayloads = CachedPayloads()
   private let settings: TransferSettings
   private let downloadCache: DownloadCache
   private let installer: Installer
@@ -98,9 +65,11 @@ private final class UpdateExecution: Sendable {
 
   init(
     plan: UpdatePlan, gameDirectory: URL, settings: TransferSettings, downloadCache: DownloadCache,
-    installer: Installer, downloadWorkers: Int, writeWorkers: Int, reporter: UpdateReporter
+    installer: Installer, downloadWorkers: Int, writeWorkers: Int, reporter: UpdateReporter,
+    cacheOnly: Bool, gameID: String, mode: GameBranchCategoryScenario, predownload: Bool
   ) async throws {
     self.settings = settings
+    self.cacheOnly = cacheOnly
     self.downloadCache = downloadCache
     self.installer = installer
     self.downloadWorkers = downloadWorkers
@@ -123,7 +92,11 @@ private final class UpdateExecution: Sendable {
     if !settings.preserveState { try await runTransferIO { try removeOwnedFile(stateDirectory) } }
     let journal =
       settings.preserveState
-      ? try await runTransferIO { try UpdateJournal(directory: stateDirectory, plan: plan) } : nil
+      ? try await runTransferIO {
+        try UpdateJournal(
+          directory: stateDirectory, plan: plan, gameID: gameID, mode: mode,
+          predownload: predownload, cacheOnly: cacheOnly)
+      } : nil
     self.journal = journal
     let activePlan = journal?.plan ?? plan
     self.plan = activePlan
@@ -141,7 +114,7 @@ private final class UpdateExecution: Sendable {
     }
     snapshots = OriginalSnapshots(
       cache: cache, directory: originals, diskLimit: settings.diskLimit, io: io, plan: activePlan,
-      writeMode: settings.writeMode, existingSizes: sizes)
+      writeMode: settings.writeMode, existingSizes: sizes, cacheOnly: cacheOnly)
   }
 
   func run() async throws {
@@ -151,12 +124,17 @@ private final class UpdateExecution: Sendable {
         patchBytes: plan.patchSize, installBytes: plan.installSize,
         totalFiles: plan.installFiles.count))
     do {
+      guard !cacheOnly || plan.patchSize <= settings.diskLimit else {
+        throw SophonClientError.UnknownError("The download cache cannot hold the complete update")
+      }
       var recovered = Set<URL>()
       for patch in plan.patchBundles.flatMap(\.patches) {
         if try await recover(patch.target) {
           recovered.insert(patch.target.fileURL)
           try await done(patch, skipped: true)
-        } else if journal?.stage(of: patch.target.fileURL) == .repair {
+        } else if journal?.stage(of: patch.target.fileURL) == .repair
+          || (!cacheOnly && journal?.stage(of: patch.target.fileURL) == .cachedRepair)
+        {
           recovered.insert(patch.target.fileURL)
           await repairs.add(patch.target)
           await reporter.record(.fileNeedsRepair(fileURL: patch.target.fileURL))
@@ -164,19 +142,21 @@ private final class UpdateExecution: Sendable {
         }
       }
       try await snapshots.preloadSharedSources(plan)
-      await reporter.record(.phaseChanged(.running))
+      await reporter.record(.phaseChanged(cacheOnly ? .caching : .running))
       try await pipeline(excluding: recovered)
       let repairFiles = await repairs.all()
       if !repairFiles.isEmpty { try await repair(repairFiles) }
-      await reporter.record(.phaseChanged(.deleting))
-      for file in plan.deleteFiles {
-        try Task.checkCancellation()
-        let removed = try await runTransferIO {
-          let exists = FileManager.default.fileExists(atPath: file.fileURL.path)
-          try removeOwnedFile(file.fileURL)
-          return exists
+      if !cacheOnly {
+        await reporter.record(.phaseChanged(.deleting))
+        for file in plan.deleteFiles {
+          try Task.checkCancellation()
+          let removed = try await runTransferIO {
+            let exists = FileManager.default.fileExists(atPath: file.fileURL.path)
+            try removeOwnedFile(file.fileURL)
+            return exists
+          }
+          await reporter.record(.fileDeleted(fileURL: file.fileURL, bytes: removed ? file.size : 0))
         }
-        await reporter.record(.fileDeleted(fileURL: file.fileURL, bytes: removed ? file.size : 0))
       }
       try await runTransferIO(checkCancellation: false) { [journal] in try journal?.complete() }
       await reporter.record(.finished(.completed))
@@ -200,7 +180,9 @@ private final class UpdateExecution: Sendable {
             guard !patches.isEmpty else { continue }
             downloads.addTask { [self] in
               try await downloadLimit.withPermit {
-                let payload = try await downloadCache.get(bundle.downloadRequest())
+                let payload = try await downloadCache.get(
+                  bundle.downloadRequest(), waitForSpace: !cacheOnly)
+                if cacheOnly { await cachedPayloads.retain(payload) }
                 await reporter.record(
                   .bundleDownloaded(patchID: bundle.patchID, bytes: bundle.patchSize))
                 for patch in patches {
@@ -252,16 +234,22 @@ private final class UpdateExecution: Sendable {
           return
         }
       }
-      guard let source = snapshot.input else {
+      guard snapshot.observed?.size == original.size,
+        snapshot.observed?.md5 == original.md5.lowercased()
+      else {
         try await queueRepair(patch)
         return
       }
-      originalInput = source
+      originalInput = snapshot.input
     } else if try await current(patch.target) {
       try await done(patch, skipped: true)
       return
     }
 
+    if cacheOnly {
+      try await cached(patch)
+      return
+    }
     let paths = outputPaths(patch.target)
     let output = settings.writeMode == .inPlace ? patch.target.fileURL : paths.temporary
     let request = PatchApplyRequest(
@@ -315,6 +303,7 @@ private final class UpdateExecution: Sendable {
   private func recover(_ target: PlannedUpdateFile) async throws -> Bool {
     let paths = outputPaths(target)
     let journal = journal
+    if cacheOnly { return false }
     return try await io.withPermit {
       try await runTransferIO {
         if journal?.stage(of: target.fileURL) == .completed {
@@ -346,7 +335,19 @@ private final class UpdateExecution: Sendable {
     }
   }
 
+  private func cached(_ patch: PlannedPatch) async throws {
+    try await runTransferIO(checkCancellation: false) { [journal] in
+      try journal?.record(patch.target.fileURL, stage: .cachedPatch)
+    }
+    await reporter.record(.fileCached(fileURL: patch.target.fileURL))
+    if let original = patch.original { try await snapshots.consumed(original) }
+  }
+
   private func done(_ patch: PlannedPatch, skipped: Bool) async throws {
+    if cacheOnly {
+      try await cached(patch)
+      return
+    }
     let paths = outputPaths(patch.target)
     try await io.withPermit { [journal] in
       try await runTransferIO(checkCancellation: false) {
@@ -370,6 +371,34 @@ private final class UpdateExecution: Sendable {
 
   private func repair(_ files: [PlannedUpdateFile]) async throws {
     await reporter.record(.phaseChanged(.repairing))
+    if cacheOnly {
+      let chunks = try makeRepairPlan(
+        files, outputURLs: Dictionary(uniqueKeysWithValues: files.map { ($0.fileURL, $0.fileURL) })
+      ).requiredChunks
+      let limit = WorkLimiter(limit: downloadWorkers)
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        for chunk in chunks {
+          group.addTask { [self] in
+            try await limit.withPermit {
+              let download = try await downloadCache.get(
+                chunk.downloadRequest(), waitForSpace: false)
+              await cachedPayloads.retain(download)
+            }
+          }
+        }
+        do { while try await group.next() != nil {} } catch {
+          group.cancelAll()
+          throw error
+        }
+      }
+      for file in files {
+        try await runTransferIO(checkCancellation: false) { [journal] in
+          try journal?.record(file.fileURL, stage: .cachedRepair)
+        }
+        await reporter.record(.fileCached(fileURL: file.fileURL))
+      }
+      return
+    }
     let paths = Dictionary(
       uniqueKeysWithValues: files.map {
         ($0.fileURL, settings.writeMode == .inPlace ? $0.fileURL : outputPaths($0).temporary)

@@ -37,6 +37,9 @@ public actor UpdateReporter: OperationReportingInternal {
       if skipped { progress.skippedFiles += 1 } else { progress.writtenBytes += bytes }
       logger.debug(
         "Update target complete", metadata: ["file": "\(fileURL.path)", "skipped": "\(skipped)"])
+    case .fileCached(let fileURL):
+      progress.cachedFiles += 1
+      logger.debug("Update target cached", metadata: ["file": "\(fileURL.path)"])
     case .fileDeleted(let fileURL, let bytes):
       progress.deletedBytes += bytes
       logger.debug("Removed obsolete file", metadata: ["file": "\(fileURL.path)"])
