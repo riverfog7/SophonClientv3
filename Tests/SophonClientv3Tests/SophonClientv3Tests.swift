@@ -4,10 +4,582 @@ import Testing
 
 @testable import SophonClientv3
 
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
+
 func getTestDataPath() -> URL {
   return URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
     .deletingLastPathComponent()
     .appendingPathComponent(".testData")
+}
+
+private struct HDiffFixture: Decodable {
+  let old: Data
+  let new: Data
+  let patch: Data
+}
+
+private func loadHDiffFixture() throws -> HDiffFixture {
+  let fixtureURL = try #require(
+    Bundle.module.url(forResource: "HDiffFixture", withExtension: "json", subdirectory: "Fixtures"))
+  return try JSONDecoder().decode(HDiffFixture.self, from: Data(contentsOf: fixtureURL))
+}
+
+@Test(arguments: [UInt64(0), UInt64(500 * 1024)])
+func testStreamedPatchWithCachedInputs(memoryLimit: UInt64) async throws {
+  let fixture = try loadHDiffFixture()
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let cache = try BinaryCache(
+    directory: root.appendingPathComponent("cache"), memoryLimit: memoryLimit,
+    diskLimit: 2 * 1024 * 1024, entryLimit: 4)
+  let originalWriter = try await cache.makeWriter(expectedSize: UInt64(fixture.old.count))
+  try await originalWriter.write(fixture.old, at: 0)
+  let original = try await originalWriter.finish()
+  let bundle = Data(repeating: 0xCC, count: 17) + fixture.patch + Data([0xFF])
+  let patchWriter = try await cache.makeWriter(expectedSize: UInt64(bundle.count))
+  try await patchWriter.write(bundle, at: 0)
+  let patchBundle = try await patchWriter.finish()
+  let patch = try patchBundle.slice(offset: 17, length: UInt64(fixture.patch.count))
+  let targetURL = root.appendingPathComponent("target.bin")
+  try fixture.old.write(to: targetURL)
+  let temporary = root.appendingPathComponent("output.bin")
+  let target = PlannedUpdateFile(
+    fileURL: targetURL, size: UInt64(fixture.new.count), md5: md5Hex(fixture.new), installChunks: []
+  )
+  let worker = PatchApplyWorker(index: 0)
+  try await worker.run(
+    PatchApplyRequest(
+      original: .cached(original), patch: .cached(patch), target: target, outputURL: temporary))
+  #expect(try Data(contentsOf: temporary) == fixture.new)
+  #expect(try Data(contentsOf: targetURL) == fixture.old)
+
+  let invalidTarget = PlannedUpdateFile(
+    fileURL: targetURL, size: target.size, md5: String(repeating: "0", count: 32), installChunks: []
+  )
+  await #expect(throws: SophonClientError.self) {
+    try await worker.run(
+      PatchApplyRequest(
+        original: .cached(original), patch: .cached(patch), target: invalidTarget,
+        outputURL: temporary))
+  }
+  #expect(try Data(contentsOf: targetURL) == fixture.old)
+}
+
+private final class TransferHTTPFixture: @unchecked Sendable {
+  struct Reply {
+    let data: Data
+    let headers: [String: String]
+    let status: Int
+    let fail: Bool
+  }
+
+  let data: Data
+  private let lock = NSLock()
+  private var failurePrefix: Int?
+  private let ignoreRanges: Bool
+  private let invalidRange: Bool
+  private let observe: @Sendable () -> Bool
+  private var requests: [String?] = []
+  private var observations: [Bool] = []
+
+  init(
+    _ data: Data, failurePrefix: Int? = nil, ignoreRanges: Bool = false,
+    invalidRange: Bool = false, observe: @escaping @Sendable () -> Bool = { true }
+  ) {
+    self.data = data
+    self.failurePrefix = failurePrefix
+    self.ignoreRanges = ignoreRanges
+    self.invalidRange = invalidRange
+    self.observe = observe
+  }
+
+  var ranges: [String?] { lock.withLock { requests } }
+  var observed: [Bool] { lock.withLock { observations } }
+
+  func reply(_ request: URLRequest) -> Reply {
+    lock.withLock {
+      let range = request.value(forHTTPHeaderField: "Range")
+      requests.append(range)
+      observations.append(observe())
+      let parts = range?.dropFirst(6).split(separator: "-")
+      let start = !ignoreRanges ? parts.flatMap { Int($0[0]) } ?? 0 : 0
+      let end = !ignoreRanges ? parts.flatMap { Int($0[1]) } ?? (data.count - 1) : data.count - 1
+      let full = range == nil || ignoreRanges
+      let bytes = data.subdata(in: start..<(end + 1))
+      let headers =
+        full
+        ? ["Content-Length": String(data.count)]
+        : [
+          "Content-Length": String(bytes.count),
+          "Content-Range": "bytes \(start)-\(end)/\(data.count + (invalidRange ? 1 : 0))",
+        ]
+      if let prefix = failurePrefix {
+        failurePrefix = nil
+        return Reply(
+          data: Data(bytes.prefix(prefix)), headers: headers, status: full ? 200 : 206, fail: true)
+      }
+      return Reply(data: bytes, headers: headers, status: full ? 200 : 206, fail: false)
+    }
+  }
+}
+
+private final class TransferURLProtocol: URLProtocol {
+  private final class Registry: @unchecked Sendable {
+    let lock = NSLock()
+    var entries: [URL: TransferHTTPFixture] = [:]
+  }
+  private static let registry = Registry()
+
+  static func register(_ fixture: TransferHTTPFixture, at url: URL) {
+    registry.lock.withLock { registry.entries[url] = fixture }
+  }
+
+  static func remove(_ url: URL) {
+    _ = registry.lock.withLock { registry.entries.removeValue(forKey: url) }
+  }
+  override class func canInit(with request: URLRequest) -> Bool {
+    request.url?.host == "transfer.invalid"
+  }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+  override func startLoading() {
+    guard let url = request.url,
+      let fixture = Self.registry.lock.withLock({ Self.registry.entries[url] })
+    else {
+      client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
+      return
+    }
+    let reply = fixture.reply(request)
+    let response = HTTPURLResponse(
+      url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: reply.data)
+    if reply.fail {
+      client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+    } else {
+      client?.urlProtocolDidFinishLoading(self)
+    }
+  }
+  override func stopLoading() {}
+}
+
+private func transferTestCache(_ directory: URL, diskLimit: UInt64 = 16 * 1024 * 1024)
+  -> DownloadCache
+{
+  let configuration = URLSessionConfiguration.ephemeral
+  configuration.protocolClasses = [TransferURLProtocol.self]
+  return DownloadCache(
+    directory: directory, diskLimit: diskLimit, maxConcurrentDownloads: 1,
+    maxRetries: 0, retryInterval: 0, configuration: configuration)
+}
+
+@Test(arguments: ["resume", "ignored-ranges", "invalid-range", "capacity", "tampered"])
+func testTransferDownloadRecovery(scenario: String) async throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let bytes = Data(
+    repeating: 0xA7, count: scenario == "ignored-ranges" ? 5 * 1024 * 1024 : 256 * 1024)
+  let url = URL(string: "https://transfer.invalid/\(UUID().uuidString)")!
+  let fixture = TransferHTTPFixture(
+    bytes, failurePrefix: scenario == "resume" ? 8192 : nil,
+    ignoreRanges: scenario == "ignored-ranges", invalidRange: scenario == "invalid-range")
+  TransferURLProtocol.register(fixture, at: url)
+  defer { TransferURLProtocol.remove(url) }
+  let request = DownloadRequest(
+    chunkID: "test", url: url, md5: md5Hex(bytes), size: UInt64(bytes.count))
+
+  if scenario == "resume" {
+    let interrupted = transferTestCache(root)
+    await #expect(throws: (any Error).self) { _ = try await interrupted.get(request) }
+    let journal = root.appendingPathComponent(
+      transferKey("\(request.md5):\(request.size)") + ".jsonl")
+    let handle = try FileHandle(forWritingTo: journal)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data("{\"range\":".utf8))
+    try handle.close()
+  }
+  let cache = transferTestCache(
+    root, diskLimit: scenario == "capacity" ? request.size : 16 * 1024 * 1024)
+  if scenario == "invalid-range" {
+    await #expect(throws: (any Error).self) { _ = try await cache.get(request) }
+    #expect(
+      try FileManager.default.contentsOfDirectory(atPath: root.path).allSatisfy {
+        !$0.hasSuffix(".bin")
+      })
+    return
+  }
+  var downloaded: CachedDownload? = try await cache.get(request)
+  #expect(try Data(contentsOf: #require(downloaded).fileURL) == bytes)
+  if scenario == "resume" { #expect(fixture.ranges.contains("bytes=8192-\(bytes.count - 1)")) }
+  if scenario == "ignored-ranges" { #expect(fixture.ranges.contains(nil)) }
+  if scenario == "tampered" {
+    let path = try #require(downloaded).fileURL
+    downloaded = nil
+    try Data(repeating: 0, count: bytes.count).write(to: path)
+    async let first = cache.get(request)
+    async let second = cache.get(request)
+    let (verified, shared) = try await (first, second)
+    #expect(try Data(contentsOf: verified.fileURL) == bytes)
+    #expect(shared.fileURL == verified.fileURL)
+    #expect(fixture.ranges.count == 2)
+  }
+  if scenario == "capacity" {
+    let nextURL = url.appendingPathComponent("second")
+    let nextBytes = Data(repeating: 0xB8, count: bytes.count)
+    let nextFixture = TransferHTTPFixture(nextBytes)
+    TransferURLProtocol.register(nextFixture, at: nextURL)
+    defer { TransferURLProtocol.remove(nextURL) }
+    let nextRequest = DownloadRequest(
+      chunkID: "second", url: nextURL, md5: md5Hex(nextBytes), size: request.size)
+    let waiting = Task { try await cache.get(nextRequest) }
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(nextFixture.ranges.isEmpty)
+    waiting.cancel()
+    await #expect(throws: CancellationError.self) { _ = try await waiting.value }
+    downloaded = nil
+    let next = try await cache.get(nextRequest)
+    #expect(try Data(contentsOf: next.fileURL) == nextBytes)
+  }
+}
+
+private func transferTestPlan(
+  root: URL, fixture: HDiffFixture, bundleID: String = "bundle"
+) throws -> UpdatePlan {
+  let targetURL = root.appendingPathComponent("target.bin")
+  let info = try JSONDecoder().decode(
+    SophonDownloadInfo.self,
+    from: JSONSerialization.data(withJSONObject: [
+      "encryption": 0, "compression": 0, "password": "",
+      "url_prefix": "https://transfer.invalid/\(root.lastPathComponent)", "url_suffix": "",
+    ]))
+  let chunk = RequiredChunk(
+    chunkID: "install", uncompressedMd5: md5Hex(fixture.new), compressedMd5: md5Hex(fixture.new),
+    compressedSize: UInt64(fixture.new.count), uncompressedSize: UInt64(fixture.new.count),
+    downloadInfo: info,
+    chunkApplicationInfos: [ChunkApplicationInfo(fileURL: targetURL, offset: 0)])
+  let target = PlannedUpdateFile(
+    fileURL: targetURL, size: UInt64(fixture.new.count), md5: md5Hex(fixture.new),
+    installChunks: [chunk])
+  let patch = PlannedPatch(
+    patchOffset: 0, patchLength: UInt64(fixture.patch.count),
+    original: PlannedPatchSource(
+      fileURL: targetURL, size: UInt64(fixture.old.count), md5: md5Hex(fixture.old)), target: target
+  )
+  return UpdatePlan(
+    sourceVersion: "old", targetVersion: "new",
+    patchBundles: [
+      PlannedPatchBundle(
+        patchID: bundleID, patchSize: UInt64(fixture.patch.count), patchHash: md5Hex(fixture.patch),
+        downloadInfo: info, patches: [patch])
+    ],
+    installFiles: [target],
+    deleteFiles: [PlannedDeleteFile(fileURL: root.appendingPathComponent("obsolete"), size: 4)])
+}
+
+@Test(arguments: [UpdateWriteMode.temporaryReplacement, .inPlace], [false, true])
+func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bool) async throws {
+  let hdiff = try loadHDiffFixture()
+  let fixture = HDiffFixture(
+    old: hdiff.old, new: hdiff.new, patch: rawPayload ? hdiff.new : hdiff.patch)
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  var settings = TransferSettings()
+  settings.cacheDirectory = root.appendingPathComponent("cache").path
+  settings.memoryLimit = 0
+  settings.ioPolicy = .serialized
+  settings.writeMode = writeMode
+  let plan = try transferTestPlan(root: root, fixture: fixture)
+  let target = try #require(plan.installFiles.first)
+  let deletion = try #require(plan.deleteFiles.first)
+  try fixture.old.write(to: target.fileURL)
+  try Data("gone".utf8).write(to: deletion.fileURL)
+  let bundleURL = try #require(plan.patchBundles.first).downloadRequest().url
+  let installURL = try #require(target.installChunks.first).getDownloadURL()
+  let bundleFixture = TransferHTTPFixture(fixture.patch)
+  let installFixture = TransferHTTPFixture(
+    fixture.new, observe: { FileManager.default.fileExists(atPath: deletion.fileURL.path) })
+  TransferURLProtocol.register(bundleFixture, at: bundleURL)
+  TransferURLProtocol.register(installFixture, at: installURL)
+  defer {
+    TransferURLProtocol.remove(bundleURL)
+    TransferURLProtocol.remove(installURL)
+  }
+  let cache = transferTestCache(settings.cacheURL.appendingPathComponent("downloads"))
+  let updater = try Updater(baseGameDir: root, maxCocurrentDownloads: 2, maxCocurrentWrites: 2)
+  let installer = try Installer(
+    baseGameDir: root, maxCocurrentChecks: 1, maxCocurrentDownloads: 2,
+    maxCocurrentPostProcessors: 2,
+    maxCocurrentWrites: 1, downloadCache: cache)
+  try await updater.predownload(
+    plan, settings: settings, downloadCache: cache,
+    reporter: UpdateReporter(logger: .init(label: "test")))
+  #expect(try Data(contentsOf: target.fileURL) == fixture.old)
+  #expect(FileManager.default.fileExists(atPath: deletion.fileURL.path))
+  #expect(bundleFixture.ranges.count == 1)
+  let patched = UpdateReporter(logger: .init(label: "test"))
+  try await updater.execute(
+    plan, settings: settings, downloadCache: cache, installer: installer, reporter: patched)
+  #expect(try Data(contentsOf: target.fileURL) == fixture.new)
+  #expect(bundleFixture.ranges.count == 1)
+  #expect(installFixture.ranges.isEmpty)
+  #expect(!FileManager.default.fileExists(atPath: deletion.fileURL.path))
+  #expect(try await SophonClientv3.savedUpdateState(at: root, settings: settings)?.finished == true)
+
+  // Only the updated target falls back to installation when its source is broken.
+  try Data(repeating: 0x00, count: fixture.old.count).write(to: target.fileURL)
+  try Data("gone".utf8).write(to: deletion.fileURL)
+  let repaired = UpdateReporter(logger: .init(label: "test"))
+  try await updater.execute(
+    plan, settings: settings, downloadCache: cache, installer: installer, reporter: repaired)
+  #expect(try Data(contentsOf: target.fileURL) == fixture.new)
+  #expect(await repaired.snapshot().repairFiles == (rawPayload ? 0 : 1))
+  #expect(installFixture.observed == (rawPayload ? [] : [true]))
+  #expect(!FileManager.default.fileExists(atPath: deletion.fileURL.path))
+
+  let skipped = UpdateReporter(logger: .init(label: "test"))
+  try await updater.execute(
+    plan, settings: settings, downloadCache: cache, installer: installer, reporter: skipped)
+  #expect(await skipped.snapshot().skippedFiles == 1)
+  #expect(bundleFixture.ranges.count == 1)
+}
+
+@Test(arguments: ["in-place", "old-renamed", "new-ready", "committed", "checkpointed"])
+func testTransferInterruptedUpdate(scenario: String) async throws {
+  let fixture = try loadHDiffFixture()
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  var settings = TransferSettings()
+  settings.cacheDirectory = root.appendingPathComponent("cache").path
+  settings.writeMode = scenario == "in-place" ? .inPlace : .temporaryReplacement
+  let plan = try transferTestPlan(root: root, fixture: fixture)
+  let patch = try #require(plan.patchBundles.first?.patches.first)
+  let source = try #require(patch.original)
+  let stateDirectory = UpdateJournal.directory(settings: settings, gameDirectory: root)
+  do {
+    let journal = try UpdateJournal(directory: stateDirectory, plan: plan)
+    try journal.record(
+      patch.target.fileURL, stage: scenario == "checkpointed" ? .completed : .writing)
+  }
+  let events = try FileHandle(forWritingTo: stateDirectory.appendingPathComponent("events.jsonl"))
+  try events.seekToEnd()
+  try events.write(contentsOf: Data("{\"path\":".utf8))
+  try events.close()
+  let key = transferKey(patch.target.fileURL.path + patch.target.md5).prefix(32)
+  let temporary = root.appendingPathComponent(".sophon-\(key).new")
+  let backup = root.appendingPathComponent(".sophon-\(key).old")
+  let bundleURL = try #require(plan.patchBundles.first).downloadRequest().url
+  let bundleFixture = TransferHTTPFixture(fixture.patch)
+  TransferURLProtocol.register(bundleFixture, at: bundleURL)
+  defer { TransferURLProtocol.remove(bundleURL) }
+  let cache = transferTestCache(settings.cacheURL.appendingPathComponent("downloads"))
+  if scenario == "in-place" {
+    let original = settings.cacheURL.appendingPathComponent("originals/\(transferKey(root.path))")
+      .appendingPathComponent(
+        transferKey("\(source.fileURL.path):\(source.size):\(source.md5)") + ".original")
+    try FileManager.default.createDirectory(
+      at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try fixture.old.write(to: original)
+    try Data(repeating: 0xE1, count: fixture.new.count / 2).write(to: patch.target.fileURL)
+    _ = try await cache.get(#require(plan.patchBundles.first).downloadRequest())
+  } else if scenario == "old-renamed" {
+    try fixture.old.write(to: backup)
+    try fixture.new.write(to: temporary)
+  } else if scenario == "new-ready" {
+    try fixture.old.write(to: patch.target.fileURL)
+    try fixture.new.write(to: temporary)
+  } else if scenario == "checkpointed" {
+    // Completion receipts are authoritative; detecting external changes is a separate verification run.
+    try Data(repeating: 0xF2, count: fixture.new.count).write(to: patch.target.fileURL)
+  } else {
+    try fixture.new.write(to: patch.target.fileURL)
+    try fixture.old.write(to: backup)
+  }
+  let updater = try Updater(baseGameDir: root, maxCocurrentDownloads: 1, maxCocurrentWrites: 1)
+  let installer = try Installer(
+    baseGameDir: root, maxCocurrentChecks: 1, maxCocurrentDownloads: 1,
+    maxCocurrentPostProcessors: 1,
+    maxCocurrentWrites: 1, downloadCache: cache)
+  try await updater.execute(
+    plan, settings: settings, downloadCache: cache, installer: installer,
+    reporter: UpdateReporter(logger: .init(label: "test")))
+  let expected =
+    scenario == "checkpointed" ? Data(repeating: 0xF2, count: fixture.new.count) : fixture.new
+  #expect(try Data(contentsOf: patch.target.fileURL) == expected)
+  #expect(!FileManager.default.fileExists(atPath: backup.path))
+  #expect(!FileManager.default.fileExists(atPath: temporary.path))
+  #expect(bundleFixture.ranges.count == (scenario == "in-place" ? 1 : 0))
+  #expect(try await SophonClientv3.savedUpdateState(at: root, settings: settings)?.finished == true)
+}
+
+@Test
+func testTransferInstallationCheckpoints() async throws {
+  let bytes = Data("verified chunk".utf8)
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let source = HDiffFixture(old: Data(), new: bytes, patch: bytes)
+  let update = try transferTestPlan(root: root, fixture: source)
+  var chunk = try #require(update.installFiles.first?.installChunks.first)
+  let first = try #require(chunk.chunkApplicationInfos.first)
+  let second = ChunkApplicationInfo(fileURL: first.fileURL, offset: UInt64(bytes.count))
+  chunk.chunkApplicationInfos = [first, second]
+  let file = PlannedFile(
+    fileURL: first.fileURL, size: UInt64(bytes.count * 2), md5: md5Hex(bytes + bytes),
+    requiredChunkCount: 2, needsTrimming: false)
+  let plan = InstallationPlan(
+    totalChunkCount: 1, downloadSize: UInt64(bytes.count), diskWriteSize: file.size,
+    requiredChunks: [chunk], plannedFiles: [file])
+  var settings = TransferSettings()
+  settings.cacheDirectory = root.appendingPathComponent("cache").path
+  let directory = InstallationJournal.directory(settings: settings, gameDirectory: root)
+  let initial = SavedInstallationState(
+    gameID: "fixture", version: "1", mode: .full, voicePacks: [], predownload: false,
+    plan: plan, completedApplications: [], trimmedFiles: [], finished: false)
+  try bytes.write(to: first.fileURL)
+  do {
+    let journal = try InstallationJournal(directory: directory, state: initial)
+    try journal.written(chunkID: chunk.chunkID, application: first)
+  }
+  let events = try FileHandle(forWritingTo: directory.appendingPathComponent("events.jsonl"))
+  try events.seekToEnd()
+  try events.write(contentsOf: Data("{\"application\":".utf8))
+  try events.close()
+  let saved = try #require(
+    try await SophonClientv3.savedInstallationState(at: root, settings: settings))
+  let remaining = saved.remainingPlan()
+  #expect(remaining.requiredChunks.first?.chunkApplicationInfos.map(\.offset) == [second.offset])
+  #expect(remaining.diskWriteSize == UInt64(bytes.count))
+  let url = try chunk.getDownloadURL()
+  let fixture = TransferHTTPFixture(bytes)
+  TransferURLProtocol.register(fixture, at: url)
+  defer { TransferURLProtocol.remove(url) }
+  let cache = transferTestCache(settings.cacheURL.appendingPathComponent("downloads"))
+  let installer = try Installer(
+    baseGameDir: root, maxCocurrentChecks: 1, maxCocurrentDownloads: 1,
+    maxCocurrentPostProcessors: 1,
+    maxCocurrentWrites: 1, downloadCache: cache)
+  let journal = try InstallationJournal(directory: directory, state: saved, resume: true)
+  let reporter = InstallationReporter(logger: .init(label: "test"))
+  try await installer.install(remaining, reporter: reporter, journal: journal)
+  try journal.complete()
+  #expect(try Data(contentsOf: first.fileURL) == bytes + bytes)
+  #expect(await reporter.snapshot().scannedFiles == 0)
+  #expect(await reporter.snapshot().writtenBytes == UInt64(bytes.count))
+  let completed = try #require(
+    try await SophonClientv3.savedInstallationState(at: root, settings: settings))
+  #expect(completed.remainingPlan().requiredChunks.isEmpty)
+  #expect(completed.finished)
+}
+
+private final class TransferRPCProcess: @unchecked Sendable {
+  let process = Process()
+  let input = Pipe()
+  let output = Pipe()
+
+  init(_ arguments: [String]) throws {
+    process.executableURL = getTestDataPath().deletingLastPathComponent()
+      .appendingPathComponent(".build/debug/SophonCLI")
+    process.arguments = ["rpc"] + arguments
+    process.standardInput = input
+    process.standardOutput = output
+    process.standardError = FileHandle.standardError
+    try process.run()
+  }
+
+  func send(_ line: String) throws {
+    try input.fileHandleForWriting.write(contentsOf: Data((line + "\n").utf8))
+  }
+
+  func read() throws -> Data {
+    var bytes = Data()
+    while let byte = try output.fileHandleForReading.read(upToCount: 1), !byte.isEmpty {
+      if byte.first == 10 { return bytes }
+      bytes.append(byte)
+      if bytes.count > 1024 * 1024 { break }
+    }
+    throw SophonClientError.UnknownError("RPC output ended before a complete message")
+  }
+
+  func stop() {
+    if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+  }
+
+  deinit {
+    stop()
+    try? input.fileHandleForWriting.close()
+    try? output.fileHandleForReading.close()
+  }
+}
+
+@Test(arguments: ["stdio", "http"])
+func testTransferRPCTransports(transport: String) async throws {
+  let child = try TransferRPCProcess(
+    transport == "http" ? ["--transport", "http", "--token", "fixture-token"] : [])
+  let timeout = Task {
+    do {
+      try await Task.sleep(for: .seconds(10))
+      child.stop()
+    } catch {}
+  }
+  defer {
+    timeout.cancel()
+    child.stop()
+  }
+  if transport == "stdio" {
+    try child.send("{\"jsonrpc\":\"2.0\",\"method\":\"rpc.discover\"}")
+    try child.send("{\"jsonrpc\":\"2.0\",\"id\":18446744073709551615,\"method\":\"rpc.discover\"}")
+    let response =
+      try JSONSerialization.jsonObject(with: await runTransferIO { try child.read() })
+      as? [String: Any]
+    #expect((response?["id"] as? NSNumber)?.uint64Value == UInt64.max)
+    #expect((response?["result"] as? [String: Any])?["methods"] is [String])
+    try child.send("{")
+    let invalid =
+      try JSONSerialization.jsonObject(with: await runTransferIO { try child.read() })
+      as? [String: Any]
+    #expect((invalid?["error"] as? [String: Any])?["code"] as? Int == -32700)
+    try child.send(
+      "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"state.inspect\",\"params\":{\"directory\":\"/nonexistent-sophon-rpc-fixture\"}}"
+    )
+    let state =
+      try JSONSerialization.jsonObject(with: await runTransferIO { try child.read() })
+      as? [String: Any]
+    #expect(state?["result"] is NSNull)
+    child.process.interrupt()
+  } else {
+    let listening =
+      try JSONSerialization.jsonObject(with: await runTransferIO { try child.read() })
+      as? [String: Any]
+    let urlString = try #require((listening?["params"] as? [String: Any])?["url"] as? String)
+    let url = try #require(URL(string: urlString))
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = Data("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"rpc.discover\"}".utf8)
+    let (_, rejected) = try await URLSession.shared.data(for: request)
+    #expect((rejected as? HTTPURLResponse)?.statusCode == 401)
+    request.setValue("Bearer fixture-token", forHTTPHeaderField: "Authorization")
+    let (data, response) = try await URLSession.shared.data(for: request)
+    #expect((response as? HTTPURLResponse)?.statusCode == 200)
+    let result = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    #expect(result?["id"] as? Int == 1)
+    request.httpBody = Data("{\"jsonrpc\":\"2.0\",\"method\":\"rpc.discover\"}".utf8)
+    let (notification, acknowledged) = try await URLSession.shared.data(for: request)
+    #expect((acknowledged as? HTTPURLResponse)?.statusCode == 204)
+    #expect(notification.isEmpty)
+    request.httpBody = Data("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"rpc.shutdown\"}".utf8)
+    let (shutdown, _) = try await URLSession.shared.data(for: request)
+    #expect(
+      (try JSONSerialization.jsonObject(with: shutdown) as? [String: Any])?["result"] as? Bool
+        == true)
+  }
+  try await runTransferIO { child.process.waitUntilExit() }
+  #expect(child.process.terminationStatus == 0)
 }
 
 func testManifestContents(_ manifest: Manifest) {
