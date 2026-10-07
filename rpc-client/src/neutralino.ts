@@ -10,19 +10,20 @@ export interface NeutralinoProcessEvent {
 export interface NeutralinoAPI {
   os: {
     spawnProcess(command: string): Promise<{ id: number; pid: number }>;
-    updateSpawnedProcess(id: number, action: string, data?: string): Promise<unknown>;
+    // The 3.8 SDK accepts any stdin data; Yaagl's declarations narrow it to object.
+    updateSpawnedProcess(id: number, action: "stdIn" | "stdInEnd" | "exit", data?: any): Promise<unknown>;
     getSpawnedProcesses(): Promise<Array<{ id: number; pid: number }>>;
     execCommand(command: string): Promise<{ exitCode: number }>;
   };
   events: {
-    on(name: string, handler: (event: NeutralinoProcessEvent) => void): Promise<unknown>;
-    off(name: string, handler: (event: NeutralinoProcessEvent) => void): Promise<unknown>;
+    on(name: "spawnedProcess", handler: (event?: NeutralinoProcessEvent) => void): Promise<unknown>;
+    off(name: "spawnedProcess", handler: (event?: NeutralinoProcessEvent) => void): Promise<unknown>;
   };
 }
 
 export interface NeutralinoClientOptions extends RpcClientOptions {
   neutralino?: NeutralinoAPI;
-  onStderr?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void | Promise<void>;
 }
 
 function quote(argument: string): string {
@@ -50,6 +51,7 @@ class NeutralinoTransport implements RpcTransport {
       this.process = await this.api.os.spawnProcess(command);
       for (const event of this.queued) this.deliver(event);
       this.queued = [];
+      if (this.ended) throw new Error("RPC process exited during startup");
     } catch (error) {
       await this.dispose();
       throw error;
@@ -61,7 +63,8 @@ class NeutralinoTransport implements RpcTransport {
     this.fail = fail;
   }
 
-  private onEvent = (event: NeutralinoProcessEvent): void => {
+  private onEvent = (event?: NeutralinoProcessEvent): void => {
+    if (!event) return;
     if (!this.process) this.queued.push(event);
     else this.deliver(event);
   };
@@ -73,7 +76,7 @@ class NeutralinoTransport implements RpcTransport {
         this.receive?.(String(event.detail.data));
         break;
       case "stdErr":
-        try { this.options.onStderr?.(String(event.detail.data)); } catch {}
+        try { Promise.resolve(this.options.onStderr?.(String(event.detail.data))).catch(() => {}); } catch {}
         break;
       case "exit":
         this.ended = true;

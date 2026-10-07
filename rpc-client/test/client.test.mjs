@@ -23,7 +23,10 @@ test("fragmented notifications and throwing UI callbacks do not break pending re
   const transport = new FakeTransport();
   const errors = [];
   const client = SophonRpcClient.fromTransport(transport, {
-    onNotificationError: error => { errors.push(error.message); },
+    onNotificationError: async error => {
+      errors.push(error.message);
+      throw new Error("UI error reporter failure");
+    },
   });
   const received = [];
   client.onNotification(() => { throw new Error("sync UI failure"); });
@@ -196,10 +199,14 @@ test("Neutralino 3.8/4.11 process APIs preserve quoting, framing and shutdown", 
   const hung = await fixture(true);
   const bridge = neutralinoBridge();
   try {
-    const client = await NeutralinoClient.stdio(normal.file, ["literal$()"], { neutralino: bridge.api });
+    const client = await NeutralinoClient.stdio(normal.file, ["literal$()"], {
+      neutralino: bridge.api,
+      onStderr: async () => { throw new Error("UI log failure"); },
+    });
     assert.ok(bridge.command.includes("'\\''"));
     assert.ok(bridge.command.includes("'literal$()'"));
     bridge.emit({ id: 900, action: "stdOut", data: "not our process\n" });
+    bridge.emit({ id: 1, action: "stdErr", data: "fixture stderr" });
     const waiting = client.wait("job");
     assert.equal(await client.cancel("job"), true);
     assert.equal((await waiting).status, "cancelled");
@@ -222,6 +229,7 @@ test("Neutralino startup buffers early events and cleans a failed spawn subscrip
   let handler;
   let removed = false;
   let fail = false;
+  let earlyExit = false;
   const api = {
     events: {
       async on(_name, value) { handler = value; },
@@ -230,6 +238,10 @@ test("Neutralino startup buffers early events and cleans a failed spawn subscrip
     os: {
       async spawnProcess() {
         if (fail) throw new Error("spawn failed");
+        if (earlyExit) {
+          handler({ detail: { id: 7, action: "exit", data: 1 } });
+          return { id: 7, pid: 123 };
+        }
         handler({ detail: { id: 7, action: "stdOut", data: '{"jsonrpc":"2.0",' } });
         return { id: 7, pid: 123 };
       },
@@ -255,6 +267,11 @@ test("Neutralino startup buffers early events and cleans a failed spawn subscrip
   fail = true;
   removed = false;
   await assert.rejects(NeutralinoClient.stdio("cli", [], { neutralino: api }), /spawn failed/);
+  assert.equal(removed, true);
+  fail = false;
+  earlyExit = true;
+  removed = false;
+  await assert.rejects(NeutralinoClient.stdio("cli", [], { neutralino: api }), /exited during startup/);
   assert.equal(removed, true);
 });
 

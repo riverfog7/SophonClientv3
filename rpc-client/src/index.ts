@@ -37,14 +37,19 @@ export interface GameAction {
   reason: string;
 }
 
-export interface InstallationProgress {
-  phase: "metadata" | "scanning" | "trimming" | "running";
+export interface OperationProgress {
+  phase: string;
   totalDownloadBytes?: number | null;
   totalWriteBytes?: number | null;
-  totalChunk?: number | null;
-  totalFile?: number | null;
   downloadedBytes: number;
   writtenBytes: number;
+  [field: string]: unknown;
+}
+
+export interface InstallationProgress extends OperationProgress {
+  phase: "metadata" | "scanning" | "trimming" | "running";
+  totalChunk?: number | null;
+  totalFile?: number | null;
   scannedFiles: number;
   completedFiles: number;
   completedChunks: number;
@@ -54,7 +59,7 @@ export interface InstallationProgress {
 export interface OperationStatus {
   operationID: string;
   status: "starting" | "running" | "completed" | "failed" | "cancelled";
-  progress?: InstallationProgress | Record<string, unknown>;
+  progress?: OperationProgress;
   error?: string;
 }
 
@@ -66,7 +71,7 @@ export interface Notification {
 export interface RpcClientOptions {
   shutdownTimeoutMs?: number;
   terminationTimeoutMs?: number;
-  onNotificationError?: (error: unknown, notification: Notification) => void;
+  onNotificationError?: (error: unknown, notification: Notification) => void | Promise<void>;
 }
 
 export interface RpcCallOptions {
@@ -316,7 +321,9 @@ export class SophonRpcClient {
 
   private listenerError(error: unknown, notification: Notification): void {
     try {
-      if (this.options.onNotificationError) this.options.onNotificationError(error, notification);
+      if (this.options.onNotificationError) {
+        Promise.resolve(this.options.onNotificationError(error, notification)).catch(() => {});
+      }
       else console.error("RPC notification listener failed", error);
     } catch {}
   }

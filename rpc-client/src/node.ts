@@ -60,7 +60,13 @@ export class SophonRpcClient extends SharedClient {
   static stdio(
     executable: string, arguments_: string[] = [], options: RpcClientOptions = {},
   ): SophonRpcClient {
-    return new SophonRpcClient(
-      new NodeTransport(spawn(executable, ["rpc", ...arguments_], { stdio: "pipe" })), options);
+    const transport = new NodeTransport(spawn(executable, ["rpc", ...arguments_], { stdio: "pipe" }));
+    try {
+      return new SophonRpcClient(transport, options);
+    } catch (error) {
+      void transport.terminate(true);
+      transport.dispose();
+      throw error;
+    }
   }
 }
