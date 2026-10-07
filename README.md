@@ -16,7 +16,7 @@ swift build
 
 ## Cache and recovery
 
-Install and update downloads share a persistent cache. Received prefixes of 4 MiB HTTP ranges are journaled after writing their bytes, and resumed requests start at those prefixes. Servers that ignore Range requests fall back to a full request. Payload size and MD5 are checked before use; cached predownloads are rechecked when read. Idle completed payloads can be evicted when space is needed; unfinished downloads are retained.
+Install and update downloads share a persistent cache. Occupied bytes and eviction order are tracked in memory; a revision marker refreshes accounting after another process changes payloads. Received prefixes of 4 MiB HTTP ranges are journaled after writing their bytes, and resumed requests start at those prefixes. Servers that ignore Range requests fall back to a full request. Payload size and MD5 are checked before use; cached predownloads are rechecked when read. Idle completed payloads can be evicted when space is needed; unfinished downloads are retained.
 
 An update only checks and modifies its selected patch targets. It skips targets already matching the new hash, caches and checks old inputs, applies HDIFF through [HDiffSwift](https://github.com/ohaiibuzzle/hdiffswift), and streams the output to disk while calculating its MD5. Raw bundle payloads are copied with the same output checks. Broken sources and failed patches fall back to their installation chunks without scanning the rest of the installation. Obsolete files are deleted last.
 

@@ -72,3 +72,51 @@ Device counters recorded 1,839,202,304 read bytes and 1,952,550,912 written byte
 The authorized untarred Genshin directory was deleted, freeing about 153 GiB. The protected `~/Game/GenshinImpactGame7.0.tar` retained its inode, 156,771,665,920-byte size, and modification time. The existing `GI71` directory was preserved. Owned test installations, temporary volumes, and cgroup limits were removed after verification; the original ZZZ installation and its completed repair checkpoint remain. Free space stayed above 140 GiB during the resource tests.
 
 Detailed one-second samples and operation logs are available in this workspace's host under `/tmp/sophon-resources/`; the setup/measurement harness is `/tmp/sophon-resource-run.py`. [Aggregated measurements](resource-validation.json) accompany this report. Re-running the workload requires constructing the same selected saved plans from the real manifests; it is not part of the normal CLI command interface.
+
+## Follow-up: RAM cache, stream counts, and the SSD bottleneck
+
+The follow-up kept game output writes enabled, put downloaded payloads and checkpoints on Linux tmpfs, and raised the original snapshot limit to 2 GiB. That limit exceeds the entire 1,839,186,803-byte original selection, so no original snapshot spilled to disk. This tests removal of physical cache writes using the existing filesystem cache implementation; it does not implement a new in-process download cache. All ten targets continued to be written and hashed normally. Physical write counters were approximately 1,952,510,000 bytes, essentially the target data plus small metadata overhead.
+
+With live downloads, one stream took 21.0 seconds, two took 13.0 seconds, and four took 12.0 seconds. A separate comparison preloaded and verified all patch payloads, prepared cold input files before starting, and ran sequentially without another test doing storage work:
+
+| Concurrent read/write streams | Wall time | Peak process RSS | Average CPU | Output rate |
+| --- | --- | --- | --- | --- |
+| 1 | 18.4 s | 484 MiB | 89% | 101 MiB/s |
+| 2 | 7.6 s | 663 MiB | 157% | 244 MiB/s |
+| 4 | 7.3 s | 836 MiB | 169% | 256 MiB/s |
+
+Two streams delivered most of the improvement. Four helped little on this selection while retaining more original data simultaneously. All 30 controlled outputs matched their manifest sizes and hashes. These are SSD results; they do not establish that additional streams improve an actual microSD/HDD.
+
+To investigate the previously observed 22 MiB/s installation rate, a separate 19-file ZZZ selection supplied 1,471 real chunks: 1,719,400,610 download bytes and 1,719,691,788 output bytes. Both storage variants used the same inputs, eight HTTP workers, four writers, and a 1 GiB download-payload quota. The timed transfers ran sequentially. Output verification overlapped part of the debug SSD run, which is a limitation of that comparison; the RAM-backed profile and transfer ran without that extra storage work.
+
+- A 1 GiB SSD probe including `fsync` measured 864 MiB/s writing and 683 MiB/s reading after per-file page-cache eviction. The earlier preparation process also used the same SSD, so these are conservative samples rather than a formal device benchmark.
+- Eight direct HTTP/1.1 curl requests at a time downloaded 456 of the same CDN's chunks, totaling 537,989,223 bytes, to `/dev/null` in 9.50 seconds: 54.0 MiB/s. All returned 206 with the expected total byte count.
+- The debug CLI with SSD cache completed the 19-file selection in 65.3 seconds: 25.1 MiB/s. Moving its download cache to tmpfs completed in 68.6 seconds: 23.9 MiB/s, while halving physical writes from about 3.45 GB to 1.72 GB. Removing cache data writes did not remove the throughput limitation.
+- A 10-second CPU profile of the tmpfs run attributed 72% of sampled cycles to `DownloadCache.reserveSpace`, 45% to Foundation file-attribute queries, and about 34.5% to owner/group name resolution through `getpwuid_r`/`getgrgid_r`. Sorting contributed 7.2%; decompression contributed 1.9%. These inclusive percentages overlap and must not be added together.
+- A small optimized metadata probe read the same 921 cache files five times. Foundation attributes took 154 ms for 4,605 calls; raw `lstat` took 7.8 ms. Both queried real file metadata. The latter fills the stat structure but does not perform Foundation dictionary creation, name resolution, or extended-attribute work.
+
+The repository code rescans the cache directory for every new chunk, retrieves full attributes for every payload, constructs candidates, and sorts them while holding the cross-process budget lock. It sorts even when the `where` condition later determines that no eviction is required. The loop is at `DownloadCache.swift:231`; Foundation attributes are called at line 248 and candidate sorting at line 265. With around 900 live payloads, bookkeeping repeats hundreds of metadata queries per megabyte downloaded. Inference, with high confidence: this serialized CPU work is the dominant bottleneck, rather than sequential SSD bandwidth or Zstd decoding.
+
+The upstream [Foundation implementation](https://github.com/swiftlang/swift-foundation/blob/main/Sources/FoundationEssentials/FileManager/FileManager%2BFiles.swift) also shows that a full attribute query performs additional work beyond a size/time stat lookup. The precise measurements above come from this installed Swift toolchain's profile, not an assumption that upstream `main` is identical.
+
+### Fix and retest
+
+The repeated directory scans were replaced with an in-memory occupied-byte count and an ordered list of completed payloads. Reservation, completion, corruption removal, and eviction update this index. A small revision marker is changed before payload mutations while holding the shared budget lock. Another cache instance refreshes after observing a different revision; an interrupted mutation causes the next operation to reconstruct the index from actual files. The local process also queues budget operations before acquiring the shared file lock, removing its own 20 ms polling delays. Range-reset operations keep the reserved partial-file size stable.
+
+On the same 19-file selection:
+
+| Code / cache | Wall time | Average payload rate |
+| --- | --- | --- |
+| Original quota scans, debug / SSD | 65.3 s | 25.1 MiB/s |
+| Original quota scans, debug / RAM filesystem | 68.6 s | 23.9 MiB/s |
+| Original quota scans, release / SSD | 59.2 s | 27.7 MiB/s |
+| Original quota scans, release / RAM filesystem | 55.1 s | 29.8 MiB/s |
+| In-memory index, release / SSD | 38.8 s | 42.3 MiB/s |
+| In-memory index, release / RAM filesystem | 36.6 s | 44.8 MiB/s |
+| Index plus local budget queue, debug / SSD | 32.6 s | 50.3 MiB/s |
+
+The final debug run sustained **54.3 MiB/s** between the samples nearest 10 and 30 seconds. Other windows gave 53.9–54.6 MiB/s, consistent with the direct CDN control. The entire operation includes metadata startup, initial connection setup, final writes, and CLI shutdown, explaining its lower overall average. The final local-queue change was tested with the freshly built debug CLI; the indexed release rows precede that final change. No further release rebuild was required to establish the steady transfer result.
+
+A late profile of the original release code, after the cache filled, still attributed 70% of sampled cycles to quota scans and 48% to file attributes. That rules out debug optimization alone as the main explanation. The indexed code no longer had those queries among the dominant sampled functions. Cache-payload logical peaks stayed below 1 GiB, and every diagnosis/retest target size and MD5 matched. Coverage remains in the existing Swift test file: 24 cases across eight functions passed, including shared cache indexes, metadata timestamp parity, shrinking limits, cancellation, corruption, and transfer recovery. Strict Swift formatting checks passed.
+
+A real `SIGKILL` test of the indexed/queued downloader retained 310 placement receipts and seven partial payloads. Restart finished the selected installation directly from its saved plan; all 19 output hashes matched, and the download pool remained below 1 GiB. The test data and RAM filesystems were cleaned up afterward; the actual ZZZ installation and protected Genshin tar were preserved.

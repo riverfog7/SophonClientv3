@@ -144,5 +144,278 @@
     },
     "focusedTestCases": 23,
     "protectedArchiveBytes": 156771665920
+  },
+  "cacheAndStreamDiagnosis": {
+    "patch-ram-warm-1b": {
+      "seconds": 18.36562227504328,
+      "peakRSSMiB": 483.6640625,
+      "averageCPUPercent": 89.46062242784137,
+      "downloadMiBPerSecond": 14.523551464408358,
+      "outputMiBPerSecond": 101.38764563367221,
+      "physicalWriteBytes": 1952509952,
+      "snapshotSpillBytes": 0,
+      "streams": 1
+    },
+    "patch-ram-warm-2b": {
+      "seconds": 7.644104547915049,
+      "peakRSSMiB": 663.08984375,
+      "averageCPUPercent": 156.85290441599605,
+      "downloadMiBPerSecond": 34.894088459351075,
+      "outputMiBPerSecond": 243.5925871228231,
+      "physicalWriteBytes": 1952522240,
+      "snapshotSpillBytes": 0,
+      "streams": 2
+    },
+    "patch-ram-warm-4b": {
+      "seconds": 7.281120270024985,
+      "peakRSSMiB": 836.08203125,
+      "averageCPUPercent": 168.65536544636504,
+      "downloadMiBPerSecond": 36.63365668955779,
+      "outputMiBPerSecond": 255.73636116541928,
+      "physicalWriteBytes": 1952530432,
+      "snapshotSpillBytes": 0,
+      "streams": 4
+    },
+    "zzz-diagnose-debug-disk": {
+      "seconds": 65.3355680560926,
+      "peakRSSMiB": 110.7421875,
+      "averageCPUPercent": 132.6077090592017,
+      "downloadMiBPerSecond": 25.09732830305332,
+      "outputMiBPerSecond": 25.101578499207797,
+      "physicalWriteBytes": 3448496128,
+      "snapshotSpillBytes": 0,
+      "streams": 4
+    },
+    "zzz-diagnose-debug-ram": {
+      "seconds": 68.60951360396575,
+      "peakRSSMiB": 109.4375,
+      "averageCPUPercent": 127.40215665214618,
+      "downloadMiBPerSecond": 23.899720537815604,
+      "outputMiBPerSecond": 23.903767920831687,
+      "physicalWriteBytes": 1719734272,
+      "snapshotSpillBytes": 0,
+      "streams": 4
+    },
+    "ssdProbe": {
+      "bytes": 1073741824,
+      "writeAndFlushSeconds": 1.185287800966762,
+      "writeMiBPerSecond": 863.9251995716061,
+      "coldReadSeconds": 1.4987004249123856,
+      "readMiBPerSecond": 683.2586305964804
+    },
+    "directCDN": {
+      "bytes": 537989223,
+      "requests": 456,
+      "seconds": 9.5,
+      "MiBPerSecond": 54.00700047141627
+    },
+    "attributeProbe": {
+      "files": 921,
+      "calls": 4605,
+      "FoundationSeconds": 0.1538823843,
+      "lstatSeconds": 0.00777709484
+    },
+    "debugProfile": {
+      "reserveSpacePercent": 72.04,
+      "fileAttributesPercent": 45.02,
+      "getpwuidPercent": 18.36,
+      "getgrgidPercent": 16.15,
+      "sortPercent": 7.22,
+      "decompressionPercent": 1.89
+    },
+    "zzz-diagnose-release-disk": {
+      "seconds": 59.221568044042215,
+      "peakRSSMiB": 109.17578125,
+      "averageCPUPercent": 142.279245185364,
+      "downloadMiBPerSecond": 27.688361783173022,
+      "outputMiBPerSecond": 27.6930507670901,
+      "physicalWriteBytes": 3448393728,
+      "snapshotSpillBytes": 0,
+      "streams": 4
+    },
+    "zzz-diagnose-release-ram": {
+      "seconds": 55.090185280074365,
+      "peakRSSMiB": 97.73046875,
+      "averageCPUPercent": 135.63214503659614,
+      "downloadMiBPerSecond": 29.76479735970904,
+      "outputMiBPerSecond": 29.76983798497996,
+      "physicalWriteBytes": 1719754752,
+      "snapshotSpillBytes": 0,
+      "streams": 4
+    },
+    "zzz-diagnose-release-disk-late": {
+      "seconds": 57.208594994968735,
+      "peakRSSMiB": 99.84375,
+      "averageCPUPercent": 134.7699589664466,
+      "downloadMiBPerSecond": 28.662619690528118,
+      "outputMiBPerSecond": 28.667473663609034,
+      "physicalWriteBytes": 3448487936,
+      "snapshotSpillBytes": 0,
+      "streams": 4
+    },
+    "zzz-index-release-disk": {
+      "seconds": 38.766211676062085,
+      "peakRSSMiB": 110.64453125,
+      "averageCPUPercent": 100.78364201918009,
+      "downloadMiBPerSecond": 42.29838641630217,
+      "outputMiBPerSecond": 42.30554958670487,
+      "physicalWriteBytes": 3460493312,
+      "snapshotSpillBytes": 0,
+      "streams": 4
+    },
+    "zzz-index-release-ram": {
+      "seconds": 36.6318562279921,
+      "peakRSSMiB": 106.78515625,
+      "averageCPUPercent": 131.98894344604224,
+      "downloadMiBPerSecond": 44.76290229915326,
+      "outputMiBPerSecond": 44.77048283174692,
+      "physicalWriteBytes": 1719734272,
+      "snapshotSpillBytes": 0,
+      "streams": 4
+    },
+    "zzz-queue-debug-disk": {
+      "seconds": 32.62385290302336,
+      "peakRSSMiB": 108.5078125,
+      "averageCPUPercent": 120.34139596173094,
+      "downloadMiBPerSecond": 50.2622484917555,
+      "outputMiBPerSecond": 50.27076033065227,
+      "physicalWriteBytes": 3460579328,
+      "snapshotSpillBytes": 0,
+      "streams": 4,
+      "steadyMiBPerSecond": 54.27904767252785
+    },
+    "releaseLateProfile": {
+      "reserveSpacePercent": 70.15,
+      "fileAttributesPercent": 48.26,
+      "getpwuidPercent": 19.21,
+      "getgrgidPercent": 16.95
+    },
+    "verifiedOutputs": {
+      "zzz-diagnose-debug-disk": {
+        "verifiedFiles": 19,
+        "bytes": 1719691788
+      },
+      "zzz-diagnose-debug-ram": {
+        "verifiedFiles": 19,
+        "bytes": 1719691788
+      },
+      "zzz-diagnose-release-disk": {
+        "verifiedFiles": 19,
+        "bytes": 1719691788
+      },
+      "zzz-diagnose-release-ram": {
+        "verifiedFiles": 19,
+        "bytes": 1719691788
+      },
+      "zzz-diagnose-release-disk-late": {
+        "verifiedFiles": 19,
+        "bytes": 1719691788
+      },
+      "zzz-index-release-disk": {
+        "verifiedFiles": 19,
+        "bytes": 1719691788
+      },
+      "zzz-index-release-ram": {
+        "verifiedFiles": 19,
+        "bytes": 1719691788
+      },
+      "zzz-queue-debug-disk": {
+        "verifiedFiles": 19,
+        "bytes": 1719691788
+      }
+    },
+    "nativeStreamVerification": {
+      "patch-ram-1": {
+        "verified": 10,
+        "duration": 21.04331625404302,
+        "RSS": 519102464,
+        "physicalWrites": 1952509952,
+        "spill": 0
+      },
+      "patch-ram-2": {
+        "verified": 10,
+        "duration": 13.016546198981814,
+        "RSS": 537575424,
+        "physicalWrites": 1952518144,
+        "spill": 0
+      },
+      "patch-ram-4": {
+        "verified": 10,
+        "duration": 12.017914704047143,
+        "RSS": 770732032,
+        "physicalWrites": 1952534528,
+        "spill": 0
+      },
+      "patch-ram-warm-1": {
+        "verified": 10,
+        "duration": 14.700116286985576,
+        "RSS": 507289600,
+        "CPU": 81.90411398758354,
+        "physicalWrites": 1952509952,
+        "spill": 0
+      },
+      "patch-ram-warm-2": {
+        "verified": 10,
+        "duration": 7.671409278991632,
+        "RSS": 699838464,
+        "CPU": 154.73037050058485,
+        "physicalWrites": 1952509952,
+        "spill": 0
+      },
+      "patch-ram-warm-4": {
+        "verified": 10,
+        "duration": 7.681269877008162,
+        "RSS": 875970560,
+        "CPU": 160.78070680691013,
+        "physicalWrites": 1952530432,
+        "spill": 0
+      },
+      "patch-ram-warm-1b": {
+        "verified": 10,
+        "duration": 18.36562227504328,
+        "RSS": 507158528,
+        "CPU": 89.46062242784137,
+        "physicalWrites": 1952509952,
+        "spill": 0
+      },
+      "patch-ram-warm-2b": {
+        "verified": 10,
+        "duration": 7.644104547915049,
+        "RSS": 695300096,
+        "CPU": 156.85290441599605,
+        "physicalWrites": 1952522240,
+        "spill": 0
+      },
+      "patch-ram-warm-4b": {
+        "verified": 10,
+        "duration": 7.281120270024985,
+        "RSS": 876695552,
+        "CPU": 168.65536544636504,
+        "physicalWrites": 1952530432,
+        "spill": 0
+      }
+    },
+    "testCases": 24,
+    "finalQueuedRun": {
+      "seconds": 32.62385290302336,
+      "peakRSSMiB": 108.5078125,
+      "averageCPUPercent": 120.34139596173094,
+      "downloadMiBPerSecond": 50.2622484917555,
+      "outputMiBPerSecond": 50.27076033065227,
+      "physicalWriteBytes": 3460579328,
+      "snapshotSpillBytes": 0,
+      "streams": 4,
+      "steadyMiBPerSecond": 54.27904767252785
+    },
+    "forcedExitRecovery": {
+      "before": {
+        "placementReceipts": 310,
+        "partialPayloads": 7,
+        "revisionBytes": 36
+      },
+      "resumedSeconds": 27.69345408503432,
+      "verifiedFiles": 19,
+      "cacheBelowLimit": true
+    }
   }
 }
