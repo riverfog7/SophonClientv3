@@ -68,6 +68,39 @@ func testStreamedPatchWithCachedInputs(memoryLimit: UInt64) async throws {
   #expect(try Data(contentsOf: targetURL) == fixture.old)
 }
 
+@Test(arguments: [UInt64(0), UInt64(16)])
+func testTransferCacheBudgets(memoryLimit: UInt64) async throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let cache = try BinaryCache(
+    directory: root, memoryLimit: memoryLimit, diskLimit: 16, entryLimit: 2)
+  let first = try await cache.makeWriter(expectedSize: 16)
+  let usage = await cache.usage
+  #expect(usage.memory == memoryLimit)
+  #expect(usage.disk == (memoryLimit == 0 ? 16 : 0))
+  #expect(usage.entries == 1)
+  await #expect(throws: BinaryCacheError.self) { _ = try await cache.makeWriter(expectedSize: 17) }
+  // Full pools wait, and a cancelled waiter must not consume bytes or an entry.
+  if memoryLimit == 0 {
+    let waiting = Task { try await cache.makeWriter(expectedSize: 1) }
+    try await Task.sleep(for: .milliseconds(20))
+    waiting.cancel()
+    await #expect(throws: CancellationError.self) { _ = try await waiting.value }
+  } else {
+    let second = try await cache.makeWriter(expectedSize: 16)
+    let both = await cache.usage
+    #expect(both.memory == 16 && both.disk == 16 && both.entries == 2)
+    try await second.abort()
+  }
+  try await first.abort()
+  for _ in 0..<100 {
+    if await cache.usage.entries == 0 { break }
+    try await Task.sleep(for: .milliseconds(1))
+  }
+  let released = await cache.usage
+  #expect(released.memory == 0 && released.disk == 0 && released.entries == 0)
+}
+
 private final class TransferHTTPFixture: @unchecked Sendable {
   struct Reply {
     let data: Data
@@ -529,22 +562,33 @@ func testTransferVersionAndActionDecision() throws {
   #expect(
     decideGameAction(
       installed: older, live: live, future: future, installation: nil, update: nil,
-      futureCached: false
+      futureCached: false, supportsPatches: true
     ).action == .update)
   #expect(
     decideGameAction(
       installed: current, live: live, future: future, installation: nil, update: nil,
-      futureCached: false
+      futureCached: false, supportsPatches: true
     ).action == .cacheUpdate)
   #expect(
     decideGameAction(
       installed: current, live: live, future: future, installation: nil, update: nil,
-      futureCached: true
+      futureCached: true, supportsPatches: true
     ).action == .none)
   #expect(
     decideGameAction(
       installed: ahead, live: live, future: future, installation: nil, update: nil,
-      futureCached: false
+      futureCached: false, supportsPatches: true
+    ).action == .none)
+  // ZZZ advertises diff tags even though its launch config disables incremental patches.
+  #expect(
+    decideGameAction(
+      installed: older, live: live, future: future, installation: nil, update: nil,
+      futureCached: false, supportsPatches: false
+    ).action == .install)
+  #expect(
+    decideGameAction(
+      installed: current, live: live, future: future, installation: nil, update: nil,
+      futureCached: false, supportsPatches: false
     ).action == .none)
   let plan = UpdatePlan(
     sourceVersion: "1", targetVersion: "2", patchBundles: [], installFiles: [], deleteFiles: [])
@@ -555,21 +599,21 @@ func testTransferVersionAndActionDecision() throws {
   #expect(
     decideGameAction(
       installed: current, live: live, future: future, installation: nil, update: writing,
-      futureCached: false
+      futureCached: false, supportsPatches: true
     ).action == .resumeUpdate)
   let liveCache = SavedUpdateState(
     gameID: "fixture", mode: .full, predownload: false, cacheOnly: true, plan: plan, files: [:],
     finished: false)
   let resumeCache = decideGameAction(
     installed: older, live: live, future: future, installation: nil, update: liveCache,
-    futureCached: false)
+    futureCached: false, supportsPatches: true)
   #expect(resumeCache.action == .resumeUpdate)
   #expect(resumeCache.cacheOnly)
   let obsolete = try branch("3", from: ["2"])
   #expect(
     decideGameAction(
       installed: current, live: obsolete, future: nil, installation: nil, update: writing,
-      futureCached: false
+      futureCached: false, supportsPatches: true
     ).action == .install)
   let cachePlan = UpdatePlan(
     sourceVersion: "2", targetVersion: "3", patchBundles: [], installFiles: [], deleteFiles: [])
@@ -579,7 +623,7 @@ func testTransferVersionAndActionDecision() throws {
   #expect(
     decideGameAction(
       installed: current, live: live, future: future, installation: nil, update: caching,
-      futureCached: false
+      futureCached: false, supportsPatches: true
     ).cacheOnly)
 }
 

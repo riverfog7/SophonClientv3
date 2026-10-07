@@ -239,7 +239,8 @@ public final class SophonClientv3: @unchecked Sendable {
     }
     return decideGameAction(
       installed: installed, live: live, future: future,
-      installation: ownInstall, update: ownUpdate, futureCached: futureCached)
+      installation: ownInstall, update: ownUpdate, futureCached: futureCached,
+      supportsPatches: gameLaunchConfig.enableLdiff)
   }
 
   private func cachedUpdateAvailable(_ state: SavedUpdateState) async throws -> Bool {

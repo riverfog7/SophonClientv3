@@ -1,7 +1,7 @@
 // TODO: Un-vibecode this
 import Foundation
 
-enum BinaryCacheError: Error {
+enum BinaryCacheError: LocalizedError {
   case invalidConfiguration
   case entryTooLarge(UInt64)
   case outOfBounds
@@ -9,6 +9,19 @@ enum BinaryCacheError: Error {
   case closed
   case invalidBufferSize
   case unexpectedEndOfFile
+
+  var errorDescription: String? {
+    switch self {
+    case .invalidConfiguration: "Invalid binary cache configuration"
+    case .entryTooLarge(let size):
+      "A cache entry requires \(size) bytes, exceeding the configured cache limits"
+    case .outOfBounds: "Binary cache access is outside the entry's bounds"
+    case .incomplete: "The binary cache entry is incomplete"
+    case .closed: "The binary cache writer is closed"
+    case .invalidBufferSize: "The binary cache buffer size must be positive"
+    case .unexpectedEndOfFile: "The binary cache file ended unexpectedly"
+    }
+  }
 }
 
 actor BinaryCache {
@@ -57,6 +70,10 @@ actor BinaryCache {
     self.memoryLimit = min(memoryLimit, UInt64(Int.max))
     self.diskLimit = min(diskLimit, UInt64(Int64.max))
     self.entryLimit = entryLimit
+  }
+
+  internal var usage: (memory: UInt64, disk: UInt64, entries: Int) {
+    (memoryBytes, diskBytes, entryCount)
   }
 
   internal func makeWriter(expectedSize: UInt64) async throws -> CachedBinaryWriter {
