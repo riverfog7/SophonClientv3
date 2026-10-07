@@ -240,7 +240,8 @@ public final class SophonClientv3: @unchecked Sendable {
     return decideGameAction(
       installed: installed, live: live, future: future,
       installation: ownInstall, update: ownUpdate, futureCached: futureCached,
-      supportsPatches: gameLaunchConfig.enableLdiff)
+      supportsPatches: gameLaunchConfig.enableLdiff,
+      voicePacks: try getInstalledVoicePacks().sorted())
   }
 
   private func cachedUpdateAvailable(_ state: SavedUpdateState) async throws -> Bool {
@@ -457,8 +458,10 @@ public final class SophonClientv3: @unchecked Sendable {
       let plan: InstallationPlan
       let journal: InstallationJournal?
       if let saved, !saved.finished, saved.version == liveTarget {
+        let installedVoicePacks = try getInstalledVoicePacks()
         guard saved.gameID == gameID, saved.mode == mode,
-          saved.voicePacks == additionalVoicePackMatchingFields.sorted()
+          Set(saved.voicePacks).union(installedVoicePacks)
+            == additionalVoicePackMatchingFields.union(installedVoicePacks)
         else {
           throw SophonClientError.UnknownError(
             "Resume the unfinished installation with the same options, or use stateless verification"

@@ -103,13 +103,13 @@ final class TransferFileLock: @unchecked Sendable {
     guard descriptor >= 0 else {
       throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
-    handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-    guard flock(handle.fileDescriptor, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) == 0 else {
+    guard flock(descriptor, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) == 0 else {
       let code = errno
-      try? handle.close()
+      _ = close(descriptor)
       if code == EWOULDBLOCK || code == EAGAIN { throw TransferLockError.busy(fileURL) }
       throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
     }
+    handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
   }
 
   func makeShared() throws {

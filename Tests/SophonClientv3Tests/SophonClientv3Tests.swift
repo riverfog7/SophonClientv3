@@ -72,6 +72,12 @@ func testStreamedPatchWithCachedInputs(memoryLimit: UInt64) async throws {
 func testTransferCacheBudgets(memoryLimit: UInt64) async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: root) }
+  let lockURL = root.appendingPathComponent("contended.lock")
+  let lock = try TransferFileLock(lockURL)
+  for _ in 0..<3 {
+    #expect(throws: TransferLockError.self) { _ = try TransferFileLock(lockURL) }
+  }
+  withExtendedLifetime(lock) {}
   let cache = try BinaryCache(
     directory: root, memoryLimit: memoryLimit, diskLimit: 16, entryLimit: 2)
   let first = try await cache.makeWriter(expectedSize: 16)
@@ -219,7 +225,7 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     repeating: 0xA7, count: scenario == "ignored-ranges" ? 5 * 1024 * 1024 : 256 * 1024)
   let url = URL(string: "https://transfer.invalid/\(UUID().uuidString)")!
   let fixture = TransferHTTPFixture(
-    bytes, failurePrefix: scenario == "resume" ? 8192 : nil,
+    bytes,
     ignoreRanges: scenario == "ignored-ranges", invalidRange: scenario == "invalid-range")
   TransferURLProtocol.register(fixture, at: url)
   defer { TransferURLProtocol.remove(url) }
@@ -227,14 +233,17 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     chunkID: "test", url: url, md5: md5Hex(bytes), size: UInt64(bytes.count))
 
   if scenario == "resume" {
-    let interrupted = transferTestCache(root)
-    await #expect(throws: (any Error).self) { _ = try await interrupted.get(request) }
-    let journal = root.appendingPathComponent(
-      transferKey("\(request.md5):\(request.size)") + ".jsonl")
-    let handle = try FileHandle(forWritingTo: journal)
-    try handle.seekToEnd()
-    try handle.write(contentsOf: Data("{\"range\":".utf8))
+    // Darwin can discard buffered URLProtocol data when didFail follows didLoad synchronously.
+    // Seed the persisted prefix to test restart independently of that delivery behavior.
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let key = transferKey("\(request.md5):\(request.size)")
+    let partial = root.appendingPathComponent(key + ".partial")
+    try Data(bytes.prefix(8192)).write(to: partial)
+    let handle = try FileHandle(forUpdating: partial)
+    try handle.truncate(atOffset: request.size)
     try handle.close()
+    try Data("{\"range\":0,\"bytes\":8192}\n{\"range\":".utf8)
+      .write(to: root.appendingPathComponent(key + ".jsonl"))
   }
   let cache = transferTestCache(
     root, diskLimit: scenario == "capacity" ? request.size : 16 * 1024 * 1024)
@@ -647,6 +656,24 @@ func testTransferVersionAndActionDecision() throws {
       installed: current, live: live, future: future, installation: nil, update: nil,
       futureCached: false, supportsPatches: false
     ).action == .none)
+  let installedPacks = ["en-us", "ko-kr"]
+  for version in [
+    older, current, ahead, InstalledVersion(version: nil, executableMD5: nil, candidates: []),
+  ] {
+    let action = decideGameAction(
+      installed: version, live: live, future: future, installation: nil, update: nil,
+      futureCached: false, supportsPatches: true, voicePacks: installedPacks)
+    #expect(action.voicePacks == installedPacks)
+  }
+  let installation = SavedInstallationState(
+    gameID: "fixture", version: "2", mode: .full, voicePacks: ["ja-jp"], predownload: false,
+    plan: InstallationPlan(
+      totalChunkCount: 0, downloadSize: 0, diskWriteSize: 0, requiredChunks: [], plannedFiles: []),
+    completedApplications: [], trimmedFiles: [], finished: false)
+  let installAction = decideGameAction(
+    installed: older, live: live, future: future, installation: installation, update: nil,
+    futureCached: false, supportsPatches: true, voicePacks: installedPacks)
+  #expect(installAction.voicePacks == ["en-us", "ja-jp", "ko-kr"])
   let plan = UpdatePlan(
     sourceVersion: "1", targetVersion: "2", patchBundles: [], installFiles: [], deleteFiles: [])
   let writing = SavedUpdateState(
