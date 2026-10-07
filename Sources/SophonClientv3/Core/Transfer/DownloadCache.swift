@@ -23,6 +23,7 @@ actor DownloadCache {
   private let retryInterval: Int
   private let http: RangeDownloadSession
   private let requests: WorkLimiter
+  private var checkedInitialCapacity = false
 
   init(
     directory: URL, diskLimit: UInt64, maxConcurrentDownloads: Int,
@@ -58,6 +59,18 @@ actor DownloadCache {
   func get(_ request: DownloadRequest, waitForSpace: Bool = true) async throws -> CachedDownload {
     try Task.checkCancellation()
     let key = transferKey("\(request.md5.lowercased()):\(request.size)")
+    if !checkedInitialCapacity {
+      // A restarted operation can lower its limit while all requested payloads are cached.
+      // Trim idle entries before acquiring payload pins, avoiding mutually pinned waiters.
+      do {
+        try await reserveSpace(
+          0, key: "", paths: DownloadPaths(directory: directory, key: ""), createPartial: false)
+      } catch DownloadCacheError.capacityBusy {
+        throw SophonClientError.UnknownError(
+          "The download cache exceeds its limit and its payloads are currently in use")
+      }
+      checkedInitialCapacity = true
+    }
     return try await fetch(request, key: key, waitForSpace: waitForSpace)
   }
 
@@ -215,7 +228,9 @@ actor DownloadCache {
     }
   }
 
-  private func reserveSpace(_ size: UInt64, key: String, paths: DownloadPaths) async throws {
+  private func reserveSpace(
+    _ size: UInt64, key: String, paths: DownloadPaths, createPartial: Bool = true
+  ) async throws {
     let budgetLock = try await acquireLock(directory.appendingPathComponent("budget.lock"))
     defer { withExtendedLifetime(budgetLock) {} }
     let directory = directory
@@ -266,7 +281,7 @@ actor DownloadCache {
           "Download cache is full of active or partial downloads; increase its limit or resume them"
         )
       }
-      if !existing {
+      if !existing, createPartial {
         guard FileManager.default.createFile(atPath: paths.partial.path, contents: nil) else {
           throw SophonClientError.UnknownError("Cannot create \(paths.partial.path)")
         }

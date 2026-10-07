@@ -209,7 +209,7 @@ private func transferTestCache(_ directory: URL, diskLimit: UInt64 = 16 * 1024 *
     maxRetries: 0, retryInterval: 0, configuration: configuration)
 }
 
-@Test(arguments: ["resume", "ignored-ranges", "invalid-range", "capacity", "tampered"])
+@Test(arguments: ["resume", "ignored-ranges", "invalid-range", "capacity", "tampered", "shrink"])
 func testTransferDownloadRecovery(scenario: String) async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: root) }
@@ -258,6 +258,26 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     #expect(try Data(contentsOf: verified.fileURL) == bytes)
     #expect(shared.fileURL == verified.fileURL)
     #expect(fixture.ranges.count == 2)
+  }
+  if scenario == "shrink" {
+    let nextURL = url.appendingPathComponent("second")
+    let nextBytes = Data(repeating: 0xB8, count: bytes.count)
+    let nextFixture = TransferHTTPFixture(nextBytes)
+    TransferURLProtocol.register(nextFixture, at: nextURL)
+    defer { TransferURLProtocol.remove(nextURL) }
+    let nextRequest = DownloadRequest(
+      chunkID: "second", url: nextURL, md5: md5Hex(nextBytes), size: request.size)
+    downloaded = nil
+    do {
+      let next = try await cache.get(nextRequest)
+      #expect(try Data(contentsOf: next.fileURL) == nextBytes)
+    }
+    let smaller = transferTestCache(root, diskLimit: request.size)
+    let next = try await smaller.get(nextRequest)
+    #expect(try Data(contentsOf: next.fileURL) == nextBytes)
+    let cached = try FileManager.default.contentsOfDirectory(atPath: root.path)
+      .filter { $0.hasSuffix(".bin") || $0.hasSuffix(".partial") }
+    #expect(cached.count == 1)
   }
   if scenario == "capacity" {
     let nextURL = url.appendingPathComponent("second")
