@@ -730,7 +730,12 @@ func testTransferInterruptedUpdate(scenario: String) async throws {
   #expect(!FileManager.default.fileExists(atPath: backup.path))
   #expect(!FileManager.default.fileExists(atPath: temporary.path))
   #expect(bundleFixture.ranges.count == (scenario == "in-place" ? 1 : 0))
-  #expect(try await SophonClientv3.savedUpdateState(at: root, settings: settings)?.finished == true)
+  let finished = try await SophonClientv3.savedUpdateState(at: root, settings: settings)
+  if scenario == "stateless" {
+    #expect(finished == nil)
+  } else {
+    #expect(finished?.finished == true)
+  }
 }
 
 @Test

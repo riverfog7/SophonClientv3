@@ -180,7 +180,7 @@ actor BinaryCache {
         let memoryHeadroom = requestedMemory - min(requestedMemory, inputMemoryBytes)
         let diskHeadroom = requestedDisk - min(requestedDisk, inputDiskBytes)
         if waiter.purpose.isDownload, requestedMemory > 0 || requestedDisk > 0,
-          entryCount >= entryLimit - 1
+          entryCount >= entryLimit - 1, entryCount == headrooms.count
         {
           continue
         }
