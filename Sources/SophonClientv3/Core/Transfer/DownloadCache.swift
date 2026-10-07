@@ -18,7 +18,8 @@ private enum DownloadCacheError: Error {
 
 actor DownloadCache {
   private let directory: URL
-  private let diskLimit: UInt64
+  nonisolated let diskLimit: UInt64
+  private let cachedSource: DownloadCache?
   private let maxRetries: Int
   private let retryInterval: Int
   private let http: RangeDownloadSession
@@ -29,10 +30,12 @@ actor DownloadCache {
 
   init(
     directory: URL, diskLimit: UInt64, maxConcurrentDownloads: Int,
-    maxRetries: Int, retryInterval: Int, configuration: URLSessionConfiguration = .ephemeral
+    maxRetries: Int, retryInterval: Int, cachedSource: DownloadCache? = nil,
+    configuration: URLSessionConfiguration = .ephemeral
   ) {
     self.directory = directory
     self.diskLimit = diskLimit
+    self.cachedSource = cachedSource
     budget = DownloadBudget(directory: directory, limit: diskLimit)
     self.maxRetries = maxRetries
     self.retryInterval = retryInterval
@@ -46,6 +49,7 @@ actor DownloadCache {
 
   // Decision checks do not fetch data or change the cache. Usage still verifies MD5.
   func contains(_ request: DownloadRequest) async throws -> Bool {
+    if let cachedSource, try await cachedSource.contains(request) { return true }
     let key = transferKey("\(request.md5.lowercased()):\(request.size)")
     let path = DownloadPaths(directory: directory, key: key).ready
     return try await runTransferIO {
@@ -61,6 +65,9 @@ actor DownloadCache {
 
   func get(_ request: DownloadRequest, waitForSpace: Bool = true) async throws -> CachedDownload {
     try Task.checkCancellation()
+    if let cachedSource, try await cachedSource.contains(request) {
+      return try await cachedSource.get(request, waitForSpace: false)
+    }
     let key = transferKey("\(request.md5.lowercased()):\(request.size)")
     if !checkedInitialCapacity {
       // A restarted operation can lower its limit while all requested payloads are cached.

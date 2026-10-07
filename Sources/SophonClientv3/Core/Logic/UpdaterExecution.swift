@@ -97,7 +97,8 @@ private final class UpdateExecution: Sendable {
       ? try await runTransferIO {
         try UpdateJournal(
           directory: stateDirectory, plan: plan, gameID: gameID, mode: mode,
-          predownload: predownload, cacheOnly: cacheOnly)
+          predownload: predownload, cacheOnly: cacheOnly,
+          predownloadDirectory: settings.predownloadURL(gameDirectory: gameDirectory).path)
       } : nil
     self.journal = journal
     let activePlan = journal?.plan ?? plan
@@ -126,7 +127,7 @@ private final class UpdateExecution: Sendable {
         patchBytes: plan.patchSize, installBytes: plan.installSize,
         totalFiles: plan.installFiles.count))
     do {
-      guard !cacheOnly || plan.patchSize <= settings.diskLimit else {
+      guard !cacheOnly || plan.patchSize <= downloadCache.diskLimit else {
         throw SophonClientError.UnknownError("The download cache cannot hold the complete update")
       }
       var recovered = Set<URL>()
@@ -134,8 +135,9 @@ private final class UpdateExecution: Sendable {
         if try await recover(patch.target) {
           recovered.insert(patch.target.fileURL)
           try await done(patch, skipped: true)
-        } else if journal?.stage(of: patch.target.fileURL) == .repair
-          || (!cacheOnly && journal?.stage(of: patch.target.fileURL) == .cachedRepair)
+        } else if !cacheOnly
+          && (journal?.stage(of: patch.target.fileURL) == .repair
+            || journal?.stage(of: patch.target.fileURL) == .cachedRepair)
         {
           recovered.insert(patch.target.fileURL)
           await repairs.add(patch.target)
@@ -218,6 +220,10 @@ private final class UpdateExecution: Sendable {
 
   private func process(_ job: ReadyPatch, worker: PatchApplyWorker) async throws {
     let patch = job.patch
+    if cacheOnly {
+      try await cached(patch)
+      return
+    }
     let input = PatchInput.download(job.bundle, offset: patch.patchOffset, size: patch.patchLength)
     let isHDiff = try await runTransferIO { try input.isHDiff() }
     var originalInput: PatchInput?
@@ -248,10 +254,6 @@ private final class UpdateExecution: Sendable {
       return
     }
 
-    if cacheOnly {
-      try await cached(patch)
-      return
-    }
     let paths = outputPaths(patch.target)
     let output = settings.writeMode == .inPlace ? patch.target.fileURL : paths.temporary
     let request = PatchApplyRequest(

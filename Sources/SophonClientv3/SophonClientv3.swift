@@ -16,6 +16,7 @@ public final class SophonClientv3: @unchecked Sendable {
   private let installer: Installer
   private let updater: Updater
   private let downloadCache: DownloadCache
+  private let predownloadCache: DownloadCache
   private let transferSettings: TransferSettings
   internal let manifestManager: CachedManifestManager
   private let gameLaunchConfig: GameLaunchConfig
@@ -32,7 +33,12 @@ public final class SophonClientv3: @unchecked Sendable {
     else { throw SophonClientError.UnknownError("Invalid worker, retry, or cache settings") }
     self.baseGameDir = baseGameDir.standardizedFileURL.resolvingSymlinksInPath()
     self.gameID = settings.gameID
-    self.transferSettings = settings.transfer
+    var transferSettings = settings.transfer
+    if transferSettings.predownloadDirectory == nil, transferSettings.preserveState {
+      transferSettings.predownloadDirectory = try await Self.savedUpdateState(
+        at: self.baseGameDir, settings: transferSettings)?.predownloadDirectory
+    }
+    self.transferSettings = transferSettings
     var puppy = Puppy()
     if settings.logStdout {
       puppy.add(
@@ -64,11 +70,16 @@ public final class SophonClientv3: @unchecked Sendable {
       launcherID: settings.launcherID, gameID: settings.gameID,
       manifestCacheDir: settings.manifestCacheDir, maxRetries: settings.maxRetries,
       retryInterval: settings.retryInterval)
+    self.predownloadCache = DownloadCache(
+      directory: transferSettings.predownloadURL(gameDirectory: self.baseGameDir),
+      diskLimit: UInt64(Int64.max), maxConcurrentDownloads: settings.maxCocurrentDownloads,
+      maxRetries: settings.maxRetries, retryInterval: settings.retryInterval)
     self.downloadCache = DownloadCache(
       directory: settings.transfer.cacheURL.appendingPathComponent("downloads"),
       diskLimit: settings.transfer.diskLimit,
       maxConcurrentDownloads: settings.maxCocurrentDownloads,
-      maxRetries: settings.maxRetries, retryInterval: settings.retryInterval)
+      maxRetries: settings.maxRetries, retryInterval: settings.retryInterval,
+      cachedSource: self.predownloadCache)
     self.installer = try Installer(
       baseGameDir: self.baseGameDir,
       maxCocurrentChecks: settings.transfer.ioPolicy == .serialized
@@ -169,7 +180,8 @@ public final class SophonClientv3: @unchecked Sendable {
           sourceVersion: detectedSource, mode: mode, predownload: predownload)
       }
       try await updater.execute(
-        plan, settings: transferSettings, downloadCache: downloadCache, installer: installer,
+        plan, settings: transferSettings,
+        downloadCache: cacheOnly ? predownloadCache : downloadCache, installer: installer,
         reporter: reporter, cacheOnly: cacheOnly, gameID: gameID, mode: mode,
         predownload: predownload)
     } catch {

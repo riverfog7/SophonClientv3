@@ -205,18 +205,21 @@ private final class TransferURLProtocol: URLProtocol {
   override func stopLoading() {}
 }
 
-private func transferTestCache(_ directory: URL, diskLimit: UInt64 = 16 * 1024 * 1024)
+private func transferTestCache(
+  _ directory: URL, diskLimit: UInt64 = 16 * 1024 * 1024, cachedSource: DownloadCache? = nil
+)
   -> DownloadCache
 {
   let configuration = URLSessionConfiguration.ephemeral
   configuration.protocolClasses = [TransferURLProtocol.self]
   return DownloadCache(
     directory: directory, diskLimit: diskLimit, maxConcurrentDownloads: 1,
-    maxRetries: 0, retryInterval: 0, configuration: configuration)
+    maxRetries: 0, retryInterval: 0, cachedSource: cachedSource, configuration: configuration)
 }
 
 @Test(arguments: [
   "resume", "ignored-ranges", "invalid-range", "capacity", "tampered", "shrink", "shared-budget",
+  "prefetched",
 ])
 func testTransferDownloadRecovery(scenario: String) async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -245,8 +248,14 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     try Data("{\"range\":0,\"bytes\":8192}\n{\"range\":".utf8)
       .write(to: root.appendingPathComponent(key + ".jsonl"))
   }
+  let source =
+    scenario == "prefetched" ? transferTestCache(root.appendingPathComponent("source")) : nil
+  if let source { _ = try await source.get(request) }
   let cache = transferTestCache(
-    root, diskLimit: scenario == "capacity" ? request.size : 16 * 1024 * 1024)
+    root,
+    diskLimit: scenario == "prefetched"
+      ? 1 : scenario == "capacity" ? request.size : 16 * 1024 * 1024,
+    cachedSource: source)
   if scenario == "invalid-range" {
     await #expect(throws: (any Error).self) { _ = try await cache.get(request) }
     #expect(
@@ -265,7 +274,13 @@ func testTransferDownloadRecovery(scenario: String) async throws {
   #expect(abs(metadata.modified.timeIntervalSince(modified)) < 0.000001)
   if scenario == "resume" { #expect(fixture.ranges.contains("bytes=8192-\(bytes.count - 1)")) }
   if scenario == "ignored-ranges" { #expect(fixture.ranges.contains(nil)) }
-  if scenario == "tampered" {
+  if scenario == "prefetched" {
+    #expect(try await cache.contains(request))
+    #expect(
+      payloadURL.deletingLastPathComponent().path == root.appendingPathComponent("source").path)
+    #expect(fixture.ranges.count == 1)
+  }
+  if scenario == "tampered" || scenario == "prefetched" {
     let path = try #require(downloaded).fileURL
     downloaded = nil
     try Data(repeating: 0, count: bytes.count).write(to: path)
@@ -391,10 +406,14 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   settings.cacheDirectory = root.appendingPathComponent("cache").path
   settings.memoryLimit = 0
   settings.writeMode = writeMode
+  if writeMode == .inPlace {
+    settings.predownloadDirectory = root.appendingPathComponent("prefetch").path
+  }
+  var cacheSettings = settings
+  cacheSettings.diskLimit = 1
   let plan = try transferTestPlan(root: root, fixture: fixture)
   let target = try #require(plan.installFiles.first)
   let deletion = try #require(plan.deleteFiles.first)
-  try fixture.old.write(to: target.fileURL)
   try Data("gone".utf8).write(to: deletion.fileURL)
   let bundleURL = try #require(plan.patchBundles.first).downloadRequest().url
   let installURL = try #require(target.installChunks.first).getDownloadURL()
@@ -407,18 +426,30 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
     TransferURLProtocol.remove(bundleURL)
     TransferURLProtocol.remove(installURL)
   }
-  let cache = transferTestCache(settings.cacheURL.appendingPathComponent("downloads"))
+  let predownload = transferTestCache(
+    settings.predownloadURL(gameDirectory: root), diskLimit: UInt64(Int64.max))
+  let cache = transferTestCache(
+    settings.cacheURL.appendingPathComponent("downloads"), cachedSource: predownload)
   let updater = try Updater(baseGameDir: root, maxCocurrentDownloads: 2, maxCocurrentWrites: 2)
   let installer = try Installer(
     baseGameDir: root, maxCocurrentChecks: 1, maxCocurrentDownloads: 2,
     maxCocurrentPostProcessors: 2,
     maxCocurrentWrites: 2, downloadCache: cache)
   try await updater.execute(
-    plan, settings: settings, downloadCache: cache, installer: installer,
+    plan, settings: cacheSettings, downloadCache: predownload, installer: installer,
     reporter: UpdateReporter(logger: .init(label: "test")), cacheOnly: true)
-  #expect(try Data(contentsOf: target.fileURL) == fixture.old)
+  #expect(!FileManager.default.fileExists(atPath: target.fileURL.path))
   #expect(FileManager.default.fileExists(atPath: deletion.fileURL.path))
   #expect(bundleFixture.ranges.count == 1)
+  #expect(installFixture.ranges.isEmpty)
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: settings.cacheURL.appendingPathComponent("downloads").path))
+  #expect(try await cache.contains(try #require(plan.patchBundles.first).downloadRequest()))
+  let cachedState = try #require(
+    try await SophonClientv3.savedUpdateState(at: root, settings: settings))
+  #expect(cachedState.predownloadDirectory == settings.predownloadURL(gameDirectory: root).path)
+  try fixture.old.write(to: target.fileURL)
   let patched = UpdateReporter(logger: .init(label: "test"))
   try await updater.execute(
     plan, settings: settings, downloadCache: cache, installer: installer, reporter: patched)
@@ -433,14 +464,16 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   try Data("gone".utf8).write(to: deletion.fileURL)
   let cachedRepair = UpdateReporter(logger: .init(label: "test"))
   try await updater.execute(
-    plan, settings: settings, downloadCache: cache, installer: installer, reporter: cachedRepair,
+    plan, settings: cacheSettings, downloadCache: predownload, installer: installer,
+    reporter: cachedRepair,
     cacheOnly: true)
   #expect(try Data(contentsOf: target.fileURL) == Data(repeating: 0x00, count: fixture.old.count))
   #expect(FileManager.default.fileExists(atPath: deletion.fileURL.path))
   let cacheState = try #require(
     try await SophonClientv3.savedUpdateState(at: root, settings: settings))
   #expect(cacheState.cacheOnly)
-  #expect(cacheState.files[target.fileURL.path] == (rawPayload ? .cachedPatch : .cachedRepair))
+  #expect(cacheState.files[target.fileURL.path] == .cachedPatch)
+  #expect(installFixture.ranges.isEmpty)
   let repaired = UpdateReporter(logger: .init(label: "test"))
   try await updater.execute(
     plan, settings: settings, downloadCache: cache, installer: installer, reporter: repaired)
@@ -677,7 +710,8 @@ func testTransferVersionAndActionDecision() throws {
   let plan = UpdatePlan(
     sourceVersion: "1", targetVersion: "2", patchBundles: [], installFiles: [], deleteFiles: [])
   let writing = SavedUpdateState(
-    gameID: "fixture", mode: .full, predownload: false, cacheOnly: false, plan: plan, files: [:],
+    gameID: "fixture", mode: .full, predownload: false, cacheOnly: false,
+    predownloadDirectory: nil, plan: plan, files: [:],
     finished: false)
   // A partially updated executable cannot hide unfinished file work.
   #expect(
@@ -686,7 +720,8 @@ func testTransferVersionAndActionDecision() throws {
       futureCached: false, supportsPatches: true
     ).action == .resumeUpdate)
   let liveCache = SavedUpdateState(
-    gameID: "fixture", mode: .full, predownload: false, cacheOnly: true, plan: plan, files: [:],
+    gameID: "fixture", mode: .full, predownload: false, cacheOnly: true,
+    predownloadDirectory: nil, plan: plan, files: [:],
     finished: false)
   let resumeCache = decideGameAction(
     installed: older, live: live, future: future, installation: nil, update: liveCache,
@@ -702,7 +737,8 @@ func testTransferVersionAndActionDecision() throws {
   let cachePlan = UpdatePlan(
     sourceVersion: "2", targetVersion: "3", patchBundles: [], installFiles: [], deleteFiles: [])
   let caching = SavedUpdateState(
-    gameID: "fixture", mode: .full, predownload: true, cacheOnly: true, plan: cachePlan, files: [:],
+    gameID: "fixture", mode: .full, predownload: true, cacheOnly: true,
+    predownloadDirectory: nil, plan: cachePlan, files: [:],
     finished: false)
   #expect(
     decideGameAction(

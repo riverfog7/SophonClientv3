@@ -17,7 +17,10 @@ console.log(action); // This query does not execute an operation.
 
 client.onNotification(({ method, params }) => console.log(method, params));
 // When the caller decides to proceed:
-const { operationID } = await client.update({ ...parameters, cacheOnly: true, predownload: true });
+const { operationID } = await client.update({
+  ...parameters, cacheOnly: true, predownload: true,
+  transfer: { predownloadDirectory: "/downloads/Genshin" },
+});
 console.log(await client.wait(operationID));
 await client.close();
 ```

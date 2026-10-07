@@ -14,6 +14,7 @@ public struct SavedUpdateState: Codable, Sendable {
   public let mode: GameBranchCategoryScenario
   public let predownload: Bool
   public let cacheOnly: Bool
+  public let predownloadDirectory: String?
   public let plan: UpdatePlan
   public let files: [String: UpdateFileStage]
   public let finished: Bool
@@ -34,7 +35,7 @@ final class UpdateJournal: @unchecked Sendable {
 
   init(
     directory: URL, plan: UpdatePlan, gameID: String = "", mode: GameBranchCategoryScenario = .full,
-    predownload: Bool = false, cacheOnly: Bool = false
+    predownload: Bool = false, cacheOnly: Bool = false, predownloadDirectory: String? = nil
   ) throws {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let planURL = directory.appendingPathComponent("plan.json")
@@ -63,6 +64,7 @@ final class UpdateJournal: @unchecked Sendable {
     try Data().write(to: eventsURL, options: .atomic)
     let state = SavedUpdateState(
       gameID: gameID, mode: mode, predownload: predownload, cacheOnly: cacheOnly,
+      predownloadDirectory: predownloadDirectory,
       plan: self.plan, files: files, finished: false)
     try JSONEncoder().encode(state).write(to: planURL, options: .atomic)
     handle = try FileHandle(forUpdating: eventsURL)
@@ -100,7 +102,8 @@ final class UpdateJournal: @unchecked Sendable {
     }
     return SavedUpdateState(
       gameID: initial.gameID, mode: initial.mode, predownload: initial.predownload,
-      cacheOnly: initial.cacheOnly, plan: initial.plan, files: files, finished: finished)
+      cacheOnly: initial.cacheOnly, predownloadDirectory: initial.predownloadDirectory,
+      plan: initial.plan, files: files, finished: finished)
   }
 
   func stage(of fileURL: URL) -> UpdateFileStage? {

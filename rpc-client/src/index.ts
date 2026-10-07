@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 
 export interface TransferSettings {
   cacheDirectory?: string;
+  predownloadDirectory?: string;
   stateDirectory?: string;
   memoryLimit?: number;
   diskLimit?: number;

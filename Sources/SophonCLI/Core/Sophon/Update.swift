@@ -7,7 +7,7 @@ extension StorageIOPolicy: ExpressibleByArgument {}
 extension UpdateWriteMode: ExpressibleByArgument {}
 
 struct TransferCLIOptions: ParsableArguments, Sendable {
-  @Option(help: "Fast local cache directory for resumable downloads and original snapshots.")
+  @Option(help: "Fast local working cache for downloads and original snapshots.")
   var cacheDirectory: String?
   @Option(help: "Operation state directory; defaults to a directory within the cache.")
   var stateDirectory: String?
@@ -59,8 +59,8 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
   var sourceVersion: String?
   @Flag(help: "Use CN endpoints.") var cn = false
   @Flag(help: "Select the future branch instead of the live branch.") var predownload = false
-  @Flag(help: "Cache update payloads without applying patches or deleting game files.")
-  var cacheOnly = false
+  @Option(help: "Download diff bundles to this directory without modifying game files.")
+  var cacheAt: String?
   @Option(help: "Installation category scenario: full or base.") var mode = "full"
   @Option(help: "Maximum parallel HTTP range downloads.") var maxConcurrentDownloads = 8
   @Option(help: "Maximum file patch workers when --io-policy parallel is selected.")
@@ -69,19 +69,21 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
   @OptionGroup var transfer: TransferCLIOptions
 
   mutating func validate() throws {
-    guard ["full", "base"].contains(mode), sourceVersion?.isEmpty != true,
+    guard ["full", "base"].contains(mode), sourceVersion?.isEmpty != true, cacheAt?.isEmpty != true,
       maxConcurrentDownloads > 0, maxConcurrentWrites > 0
     else { throw ValidationError("Invalid update scenario, source version, or worker count") }
   }
 
   mutating func run() async throws {
+    var settings = transfer.settings
+    settings.predownloadDirectory = cacheAt
     let client = try await makeOperationClient(
-      game: game, directory: directory, cn: cn, transfer: transfer.settings,
+      game: game, directory: directory, cn: cn, transfer: settings,
       downloads: maxConcurrentDownloads, writes: maxConcurrentWrites)
     let scenario: GameBranchCategoryScenario = mode == "base" ? .base : .full
     let sourceVersion = sourceVersion
     let predownload = predownload
-    let cacheOnly = cacheOnly
+    let cacheOnly = cacheAt != nil
     if plan {
       let plan = try await client.planUpdate(
         sourceVersion: sourceVersion, mode: scenario, predownload: predownload)

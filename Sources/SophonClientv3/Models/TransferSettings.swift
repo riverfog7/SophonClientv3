@@ -12,6 +12,7 @@ public enum UpdateWriteMode: String, Codable, CaseIterable, Sendable {
 
 public struct TransferSettings: Codable, Sendable {
   public var cacheDirectory: String?
+  public var predownloadDirectory: String?
   public var stateDirectory: String?
   public var memoryLimit: UInt64 = 500 * 1024 * 1024
   public var diskLimit: UInt64 = 10 * 1024 * 1024 * 1024
@@ -36,8 +37,15 @@ public struct TransferSettings: Codable, Sendable {
     return cacheURL.appendingPathComponent("state", isDirectory: true)
   }
 
+  internal func predownloadURL(gameDirectory: URL) -> URL {
+    if let predownloadDirectory {
+      return URL(fileURLWithPath: predownloadDirectory).standardizedFileURL
+    }
+    return gameDirectory.appendingPathComponent(".sophon-predownload", isDirectory: true)
+  }
+
   private enum CodingKeys: String, CodingKey {
-    case cacheDirectory, stateDirectory, memoryLimit, diskLimit, entryLimit
+    case cacheDirectory, predownloadDirectory, stateDirectory, memoryLimit, diskLimit, entryLimit
     case ioPolicy, writeMode, preserveState
   }
 
@@ -45,6 +53,7 @@ public struct TransferSettings: Codable, Sendable {
     self.init()
     let values = try decoder.container(keyedBy: CodingKeys.self)
     cacheDirectory = try values.decodeIfPresent(String.self, forKey: .cacheDirectory)
+    predownloadDirectory = try values.decodeIfPresent(String.self, forKey: .predownloadDirectory)
     stateDirectory = try values.decodeIfPresent(String.self, forKey: .stateDirectory)
     memoryLimit = try values.decodeIfPresent(UInt64.self, forKey: .memoryLimit) ?? memoryLimit
     diskLimit = try values.decodeIfPresent(UInt64.self, forKey: .diskLimit) ?? diskLimit

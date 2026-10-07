@@ -6,17 +6,19 @@ Swift 6.3 library and CLI for Sophon installation, incremental updates, and pred
 swift build
 .build/debug/SophonCLI --help
 .build/debug/SophonCLI update GAME /games/GAME
-.build/debug/SophonCLI update GAME /games/GAME --predownload --cache-only
+.build/debug/SophonCLI update GAME /games/GAME --predownload --cache-at /downloads/GAME
 .build/debug/SophonCLI next-action GAME /games/GAME
 .build/debug/SophonCLI state /games/GAME
 .build/debug/SophonCLI state /games/GAME --operation install
 ```
 
-`GAME` accepts an API game ID or biz. `--cn` selects CN endpoints; `--mode base` selects the base installation scenario. `update --predownload` selects the future branch; `--cache-only` runs source checks and caches bundles/repair chunks while skipping target writes and deletions. The default source version is detected from the configured executable MD5 and API version records; `--from` overrides it. `update --plan` prints the static manifest plan without modifying game files.
+`GAME` accepts an API game ID or biz. `--cn` selects CN endpoints; `--mode base` selects the base installation scenario. `update --predownload` selects the future branch; `--cache-at PATH` downloads and verifies its diff bundles there, without scanning patch sources, applying patches, or deleting game files. The default source version is detected from the configured executable MD5 and API version records; `--from` overrides it. `update --plan` prints the static manifest plan without modifying game files.
 
 ## Cache and recovery
 
 Install and update downloads share a persistent cache. Occupied bytes and eviction order are tracked in memory; a revision marker refreshes accounting after another process changes payloads. Received prefixes of 4 MiB HTTP ranges are journaled after writing their bytes, and resumed requests start at those prefixes. Servers that ignore Range requests fall back to a full request. Payload size and MD5 are checked before use; cached predownloads are rechecked when read. Idle completed payloads can be evicted when space is needed; unfinished downloads are retained.
+
+`update --cache-at PATH` stores the complete predownload separately from the bounded fast working cache. Its size is limited by available storage, rather than `--disk-cache-gib`. Resume by repeating the command. The chosen directory is saved with the update state; a later update without `--cache-at` reads and verifies those bundles before downloading missing data through the normal cache. Predownloads remain in their chosen directory after application.
 
 An update only checks and modifies its selected patch targets. It skips targets already matching the new hash, caches and checks old inputs, applies HDIFF through [HDiffSwift](https://github.com/ohaiibuzzle/hdiffswift), and streams the output to disk while calculating its MD5. Raw bundle payloads are copied with the same output checks. Broken sources and failed patches fall back to their installation chunks without scanning the rest of the installation. Obsolete files are deleted last.
 
@@ -30,7 +32,8 @@ Useful options on `install` and `update`:
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `--cache-directory PATH` | User cache directory | Download and original-file storage; choose a fast local drive |
+| `--cache-directory PATH` | User cache directory | Bounded working cache for live downloads and original files |
+| `--cache-at PATH` | Off | Update only: download verified diff bundles here without applying |
 | `--state-directory PATH` | Within cache | Saved plan and per-file checkpoints |
 | `--memory-cache-mib N` | 500 | RAM budget in MiB for original snapshots |
 | `--disk-cache-gib N` | 10 | Limit in GiB for each download/snapshot/original disk pool |
@@ -39,11 +42,11 @@ Useful options on `install` and `update`:
 | `--io-policy serialized` | Update | One target reader/writer at a time, including repair writes |
 | `--stateless` | Off | Rebuild work from files instead of trusting saved checkpoints |
 
-Originals exceeding the RAM budget spill to disk. In-place originals and originals needed by another update target remain on disk until their consumers finish. Download-cache pins and byte limits provide backpressure while patch workers consume bundles. Insufficient capacity for one payload, required originals, or a complete predownload fails with an error. Unfinished partial downloads are retained rather than evicted; unrelated stale partials may require a larger cache or manual removal when no operation is using it.
+Originals exceeding the RAM budget spill to disk. In-place originals and originals needed by another update target remain on disk until their consumers finish. Download-cache pins and byte limits provide backpressure while patch workers consume bundles. Insufficient working-cache capacity for one live payload or required originals fails with an error. Unfinished partial downloads are retained rather than evicted; unrelated stale partials may require a larger cache or manual removal when no operation is using it.
 
 These are cache-storage limits, not a process memory cap or a total filesystem quota. The RAM limit covers updater original snapshots; manifests, native patch buffers, installer chunks, and HTTP buffers use additional memory. Disk limits count logical payload bytes separately for downloads, transient snapshots, and durable originals. Filesystem allocation, journals/state, and target temporary files add disk use. Lowering a disk limit trims idle completed downloads on first cache access; retained partial downloads or active pins can prevent fitting the new limit.
 
-Updates use serialized target I/O by default, including cache-only source checks and repair writes. Serialized mode keeps target reads and writes separate, flushing verified output before the next read, while HTTP transfers and cache I/O continue on the fast drive. Installations keep parallel target I/O by default; installer scanning already precedes target writes. Use `--io-policy parallel` to enable the configured update patch worker count. These policies do not measure the hardware or promise a particular throughput.
+Updates use serialized target I/O by default, including repair writes. Serialized mode keeps target reads and writes separate, flushing verified output before the next read, while HTTP transfers and cache I/O continue on the cache drive. Installations keep parallel target I/O by default; installer scanning already precedes target writes. Use `--io-policy parallel` to enable the configured update patch worker count. These policies do not measure the hardware or promise a particular throughput.
 
 SIGINT/SIGTERM cancel queued work and drain an active native patch write before exiting. A forced kill retains the last recorded state. Separate processes cannot modify the same game directory concurrently.
 
@@ -60,7 +63,7 @@ Start `.build/debug/SophonCLI rpc` for newline-delimited JSON-RPC 2.0 on stdin/s
 
 `install.start` and `update.start` return an operation ID immediately. Stdio emits `operation.progress` and `operation.finished` notifications. `operation.wait` waits for the final status; cancellation remains available while it waits. Status for the most recent 128 completed operations is kept in the process. `state.inspect` needs only `directory`, optional `transfer`, and optional `operation` (`update` by default or `install`); it reads persisted state without contacting the API.
 
-Operation parameters: `game`, `directory`, optional `cn`, `mode` (`full`/`base`), `voicePacks` and `predownload` (installation), `downloads` (8), `writes` (4), and `transfer`. `sourceVersion` is optional for updates. `predownload: true` selects the future branch, and `cacheOnly: true` caches update/repair data without applying it. `game.version` reports executable-based detection, and `game.nextAction` returns a decision without executing it. Transfer fields use bytes for `memoryLimit` and `diskLimit`, an `entryLimit` of 500 by default, and `writeMode: "temporary"` or `"in-place"`. Set `transfer.preserveState: false` for a fresh verification.
+Operation parameters: `game`, `directory`, optional `cn`, `mode` (`full`/`base`), `voicePacks` and `predownload` (installation), `downloads` (8), `writes` (4), and `transfer`. `sourceVersion` is optional for updates. `predownload: true` selects the future branch, and `cacheOnly: true` downloads verified diff bundles without applying them. `transfer.predownloadDirectory` selects their directory, defaulting to the saved location or `<game>/.sophon-predownload`. `game.version` reports executable-based detection, and `game.nextAction` returns a decision without executing it. Transfer fields use bytes for `memoryLimit` and `diskLimit`, an `entryLimit` of 500 by default, and `writeMode: "temporary"` or `"in-place"`. Set `transfer.preserveState: false` for a fresh verification.
 
 Omitting `transfer.ioPolicy` uses serialized updates and parallel installations. Set it to `"parallel"` to let updates use the `writes` worker count, or `"serialized"` to serialize installation target I/O too.
 
