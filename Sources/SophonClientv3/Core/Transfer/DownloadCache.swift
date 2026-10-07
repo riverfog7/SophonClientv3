@@ -184,7 +184,7 @@ actor DownloadCache {
               var offset = range.lowerBound
               while offset < range.upperBound {
                 let count = Int(min(1024 * 1024, range.upperBound - offset))
-                let data = try await runTransferIO {
+                let data = try await runTransferIO { [offset] in
                   try handle.seek(toOffset: offset)
                   return try handle.read(upToCount: count) ?? Data()
                 }
