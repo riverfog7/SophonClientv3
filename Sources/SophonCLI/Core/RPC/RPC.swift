@@ -35,7 +35,7 @@ struct RPCCLI: AsyncParsableCommand {
   mutating func run() async throws {
     let writer = RPCOutput()
     if transport == .stdio {
-      let dispatcher = RPCDispatcher { value in try? await writer.send(value) }
+      let dispatcher = RPCDispatcher { value in try await writer.sendNotification(value) }
       let input = RPCInput()
       let interrupts = InstallInterrupts {
         input.stop()
@@ -48,7 +48,10 @@ struct RPCCLI: AsyncParsableCommand {
             while !Task.isCancelled, !(await dispatcher.stopping) {
               guard let data = try await input.next() else { break }
               if containsRPCShutdown(data) {
-                if let response = await dispatcher.handle(data) { try await writer.send(response) }
+                if let response = await dispatcher.handle(data) {
+                  if await dispatcher.stopping { await dispatcher.drainNotifications() }
+                  try await writer.send(response)
+                }
                 if await dispatcher.stopping { break }
                 continue
               }
@@ -63,6 +66,7 @@ struct RPCCLI: AsyncParsableCommand {
             }
             responses.cancelAll()
             await dispatcher.shutdown()
+            await dispatcher.drainNotifications()
             while try await responses.next() != nil {}
           }
         } onCancel: {
@@ -71,6 +75,7 @@ struct RPCCLI: AsyncParsableCommand {
         }
       } catch {
         await dispatcher.shutdown()
+        await dispatcher.drainNotifications()
         withExtendedLifetime(interrupts) {}
         throw error
       }
@@ -91,21 +96,123 @@ private func containsRPCShutdown(_ data: Data) -> Bool {
   return value.object?["method"]?.string == "rpc.shutdown"
 }
 
-private actor RPCOutput {
-  private let queue = DispatchQueue(label: "sophon.rpc.stdout", qos: .utility)
+actor RPCOutput {
+  private enum Body: Sendable {
+    case reply(Data)
+    case notification(RPCNotification)
+  }
+
+  private struct Pending: Sendable {
+    let body: Body
+    let continuation: CheckedContinuation<Void, any Error>
+  }
+
+  private let writeFrame: @Sendable (Data) async throws -> Void
+  private var replies: [Pending] = []
+  private var replyHead = 0
+  private var notifications: [Pending] = []
+  private var notificationHead = 0
+  private var sending = false
+  private var failure: (any Error)?
+
+  init(writeFrame: (@Sendable (Data) async throws -> Void)? = nil) {
+    let queue = DispatchQueue(label: "sophon.rpc.stdout", qos: .utility)
+    self.writeFrame =
+      writeFrame ?? { data in
+        try await withCheckedThrowingContinuation {
+          (continuation: CheckedContinuation<Void, any Error>) in
+          queue.async {
+            continuation.resume(
+              with: Result {
+                #if canImport(ObjectiveC)
+                  try autoreleasepool { try FileHandle.standardOutput.write(contentsOf: data) }
+                #else
+                  try FileHandle.standardOutput.write(contentsOf: data)
+                #endif
+              })
+          }
+        }
+      }
+  }
 
   func send(_ value: JSONValue) async throws { try await send(JSONEncoder().encode(value)) }
 
-  func send(_ data: Data) async throws {
-    var framed = data
-    framed.append(10)
-    let bytes = framed
-    try await withCheckedThrowingContinuation {
-      (continuation: CheckedContinuation<Void, any Error>) in
-      queue.async {
-        continuation.resume(with: Result { try FileHandle.standardOutput.write(contentsOf: bytes) })
+  func send(_ data: Data) async throws { try await submit(.reply(data)) }
+
+  func sendNotification(_ value: JSONValue) async throws {
+    try await sendNotification(RPCNotification(value))
+  }
+
+  func sendNotification(_ value: RPCNotification) async throws {
+    try await submit(.notification(value))
+  }
+
+  var queuedCounts: (replies: Int, notifications: Int) {
+    (replies.count - replyHead, notifications.count - notificationHead)
+  }
+
+  private func submit(_ body: Body) async throws {
+    if let failure { throw failure }
+    try await withCheckedThrowingContinuation { continuation in
+      let pending = Pending(body: body, continuation: continuation)
+      switch body {
+      case .reply: replies.append(pending)
+      case .notification: notifications.append(pending)
+      }
+      if !sending {
+        sending = true
+        Task { await pump() }
       }
     }
+  }
+
+  private func next() -> Pending? {
+    if replyHead < replies.count {
+      let pending = replies[replyHead]
+      replyHead += 1
+      if replyHead == replies.count {
+        replies.removeAll(keepingCapacity: true)
+        replyHead = 0
+      }
+      return pending
+    }
+    if notificationHead < notifications.count {
+      let pending = notifications[notificationHead]
+      notificationHead += 1
+      if notificationHead == notifications.count {
+        notifications.removeAll(keepingCapacity: true)
+        notificationHead = 0
+      }
+      return pending
+    }
+    return nil
+  }
+
+  private func pump() async {
+    while let pending = next() {
+      do {
+        var frame: Data
+        switch pending.body {
+        case .reply(let data): frame = data
+        case .notification(let notification):
+          let value = await notification.value()
+          #if canImport(ObjectiveC)
+            frame = try autoreleasepool { try JSONEncoder().encode(value) }
+          #else
+            frame = try JSONEncoder().encode(value)
+          #endif
+        }
+        frame.append(10)
+        try await writeFrame(frame)
+        pending.continuation.resume()
+      } catch {
+        failure = error
+        pending.continuation.resume(throwing: error)
+        while let waiting = next() { waiting.continuation.resume(throwing: error) }
+        break
+      }
+    }
+    sending = false
   }
 }
 

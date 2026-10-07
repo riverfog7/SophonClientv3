@@ -11,6 +11,7 @@ indirect enum JSONValue: Codable, Sendable {
   case decimal(Double)
   case bool(Bool)
   case null
+  case encoded(any Encodable & Sendable)
 
   init(from decoder: any Decoder) throws {
     let value = try decoder.singleValueContainer()
@@ -44,6 +45,7 @@ indirect enum JSONValue: Codable, Sendable {
     case .decimal(let decimal): try value.encode(decimal)
     case .bool(let bool): try value.encode(bool)
     case .null: try value.encodeNil()
+    case .encoded(let payload): try payload.encode(to: encoder)
     }
   }
 
@@ -120,13 +122,16 @@ private struct RPCStateParameters: Decodable {
 
 actor RPCDispatcher {
   private(set) var stopping = false
-  private let notify: @Sendable (JSONValue) async -> Void
+  private let notify: (@Sendable (RPCNotification) async throws -> Void)?
   private var operations: [String: Task<Void, Never>] = [:]
   private var status: [String: JSONValue] = [:]
+  private var progressSources: [String: @Sendable () async -> JSONValue] = [:]
+  private var feeds: [String: any RPCEventDelivery] = [:]
+  private var terminalNotifications: [String: Task<Void, Never>] = [:]
   private var directories: [String: String] = [:]
   private var completed: [String] = []
 
-  init(notify: @escaping @Sendable (JSONValue) async -> Void = { _ in }) { self.notify = notify }
+  init(notify: (@Sendable (RPCNotification) async throws -> Void)? = nil) { self.notify = notify }
 
   func handle(_ data: Data) async -> Data? {
     let value: JSONValue
@@ -230,15 +235,12 @@ actor RPCDispatcher {
           settings: params.transfer ?? TransferSettings()))
     case "operation.status":
       let id = try operationID(params)
-      guard let value = status[id] else {
-        throw RPCFailure(code: -32001, message: "Unknown operation")
-      }
-      return value
+      return try await currentStatus(id)
     case "operation.wait":
       let id = try operationID(params)
       guard status[id] != nil else { throw RPCFailure(code: -32001, message: "Unknown operation") }
       if let task = operations[id] { await task.value }
-      return status[id] ?? .null
+      return try await currentStatus(id)
     case "operation.cancel":
       let id = try operationID(params)
       guard let task = operations[id] else {
@@ -274,49 +276,20 @@ actor RPCDispatcher {
     do {
       let operationClient = try await self.client(params)
       client = operationClient
+      status[id] = .object(["operationID": .string(id), "status": .string("running")])
       let mode: GameBranchCategoryScenario = params.mode == "base" ? .base : .full
       if method == "install.start" {
         let reporter = operationClient.makeInstallationReporter(id: id)
-        let subscription = await reporter.subscribe()
-        let forwarding = Task {
-          for await _ in subscription.events {
-            let snapshot = await reporter.snapshot()
-            if let value = try? JSONValue.value(snapshot) {
-              await self.progress(id, value: value)
-            }
-          }
-        }
-        do {
-          try await operationClient.install(
-            mode: mode, additionalVoicePackMatchingFields: Set(params.voicePacks),
-            predownload: params.predownload, reporter: reporter)
-        } catch {
-          await reporter.unsubscribe(subscription.id)
-          await forwarding.value
-          throw error
-        }
-        await reporter.unsubscribe(subscription.id)
-        await forwarding.value
+        await subscribe(id, kind: "install", reporter: reporter)
+        try await operationClient.install(
+          mode: mode, additionalVoicePackMatchingFields: Set(params.voicePacks),
+          predownload: params.predownload, reporter: reporter)
       } else {
         let reporter = operationClient.makeUpdateReporter(id: id)
-        let subscription = await reporter.subscribe()
-        let forwarding = Task {
-          for await _ in subscription.events {
-            let value = try? JSONValue.value(await reporter.snapshot())
-            if let value { await self.progress(id, value: value) }
-          }
-        }
-        do {
-          try await operationClient.update(
-            sourceVersion: params.sourceVersion, mode: mode, predownload: params.predownload,
-            cacheOnly: params.cacheOnly, reporter: reporter)
-        } catch {
-          await reporter.unsubscribe(subscription.id)
-          await forwarding.value
-          throw error
-        }
-        await reporter.unsubscribe(subscription.id)
-        await forwarding.value
+        await subscribe(id, kind: "update", reporter: reporter)
+        try await operationClient.update(
+          sourceVersion: params.sourceVersion, mode: mode, predownload: params.predownload,
+          cacheOnly: params.cacheOnly, reporter: reporter)
       }
       await finish(id, outcome: "completed")
     } catch {
@@ -328,28 +301,63 @@ actor RPCDispatcher {
     operations.removeValue(forKey: id)
   }
 
-  private func progress(_ id: String, value: JSONValue) async {
-    status[id] = .object([
-      "operationID": .string(id), "status": .string("running"), "progress": value,
-    ])
-    await notify(
-      .object([
-        "jsonrpc": .string("2.0"), "method": .string("operation.progress"), "params": status[id]!,
-      ]))
+  private func subscribe<Reporter: OperationReporting>(
+    _ id: String, kind: String, reporter: Reporter
+  ) async where Reporter.Event: Encodable, Reporter.Progress: Encodable {
+    progressSources[id] = { .encoded(await reporter.snapshot()) }
+    guard let notify else { return }
+    feeds[id] = await RPCProgressFeed(
+      reporter: reporter, operationID: id, kind: kind,
+      status: { [weak self] in await self?.status[id] ?? .null }, send: notify,
+      onDrained: { [weak self] in await self?.deliveryFinished(id) })
+  }
+
+  private func currentStatus(_ id: String) async throws -> JSONValue {
+    guard var value = status[id]?.object else {
+      throw RPCFailure(code: -32001, message: "Unknown operation")
+    }
+    if let source = progressSources[id] {
+      let progress = await source()
+      value = status[id]?.object ?? value
+      value["progress"] = progress
+    }
+    return .object(value)
   }
 
   private func finish(_ id: String, outcome: String, error: String? = nil) async {
-    var value = status[id]?.object ?? [:]
+    var value = (try? await currentStatus(id))?.object ?? [:]
     value["status"] = .string(outcome)
     if let error { value["error"] = .string(error) }
     status[id] = .object(value)
+    progressSources.removeValue(forKey: id)
     completed.append(id)
     while completed.count > 128 { status.removeValue(forKey: completed.removeFirst()) }
-    await notify(
-      .object([
-        "jsonrpc": .string("2.0"), "method": .string("operation.finished"),
-        "params": .object(value),
-      ]))
+    if let feed = feeds[id] {
+      await feed.finish(.object(value))
+    } else if let notify {
+      let terminal = JSONValue.object(value)
+      terminalNotifications[id] = Task { [weak self] in
+        try? await notify(
+          RPCNotification(
+            .object([
+              "jsonrpc": .string("2.0"), "method": .string("operation.finished"),
+              "params": terminal,
+            ])))
+        await self?.deliveryFinished(id)
+      }
+    }
+  }
+
+  private func deliveryFinished(_ id: String) {
+    feeds.removeValue(forKey: id)
+    terminalNotifications.removeValue(forKey: id)
+  }
+
+  func drainNotifications() async {
+    let deliveries = Array(feeds.values)
+    let terminal = Array(terminalNotifications.values)
+    for delivery in deliveries { await delivery.drain() }
+    for task in terminal { await task.value }
   }
 
   func shutdown() async {

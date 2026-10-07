@@ -64,7 +64,7 @@ let package = Package(
     ),
     .testTarget(
       name: "SophonClientv3Tests",
-      dependencies: ["SophonClientv3"],
+      dependencies: ["SophonClientv3", "SophonCLI"],
       resources: [.copy("Fixtures")]
     ),
   ],

@@ -2,6 +2,11 @@ import Foundation
 import HYPAPIClient
 import Testing
 
+@testable import enum SophonCLI.JSONValue
+@testable import class SophonCLI.RPCEventBuffer
+@testable import struct SophonCLI.RPCNotification
+@testable import class SophonCLI.RPCOutput
+@testable import class SophonCLI.RPCProgressFeed
 @testable import SophonClientv3
 
 #if canImport(FoundationNetworking)
@@ -1059,6 +1064,198 @@ private final class TransferRPCProcess: @unchecked Sendable {
     try? input.fileHandleForWriting.close()
     try? output.fileHandleForReading.close()
   }
+}
+
+private actor RPCBatchTestSink {
+  private(set) var frames: [Data] = []
+  private(set) var blocked = false
+  private var released = false
+  private var releaseWrite: CheckedContinuation<Void, Never>?
+  private var entered: [CheckedContinuation<Void, Never>] = []
+
+  func write(_ frame: Data) async {
+    frames.append(frame)
+    guard frames.count == 1, !released else { return }
+    await withCheckedContinuation { continuation in
+      releaseWrite = continuation
+      blocked = true
+      for waiting in entered { waiting.resume() }
+      entered.removeAll()
+    }
+  }
+
+  func waitUntilBlocked() async {
+    if blocked { return }
+    await withCheckedContinuation { entered.append($0) }
+  }
+
+  func release() {
+    released = true
+    blocked = false
+    releaseWrite?.resume()
+    releaseWrite = nil
+    for waiting in entered { waiting.resume() }
+    entered.removeAll()
+  }
+}
+
+@Test(arguments: [false, true])
+func testTransferRPCEventBatches(cancelled: Bool) async throws {
+  let reporter = InstallationReporter(logger: .init(label: "rpc-batch-test"))
+  let sink = RPCBatchTestSink()
+  let output = RPCOutput(writeFrame: { await sink.write($0) })
+  let deadline = Task {
+    do {
+      try await Task.sleep(for: .seconds(10))
+      Issue.record("RPC batch sender did not finish")
+      await sink.release()
+    } catch {}
+  }
+  defer { deadline.cancel() }
+  let feed = await RPCProgressFeed(
+    reporter: reporter, operationID: "job", kind: "install",
+    status: { .object(["operationID": .string("job"), "status": .string("running")]) },
+    send: { try await output.sendNotification($0) })
+  await reporter.record(.phaseChanged(.scanning))
+  await sink.waitUntilBlocked()
+  #expect(await sink.frames.count == 1)
+
+  for index in 0..<10_000 {
+    await reporter.record(.chunkDownloaded(chunkID: String(index), bytes: 1))
+  }
+  await reporter.record(.finished(cancelled ? .cancelled : .completed))
+  let snapshot = await reporter.snapshot()
+  let terminal = JSONValue.object([
+    "operationID": .string("job"), "status": .string(cancelled ? "cancelled" : "completed"),
+    "progress": .encoded(snapshot),
+  ])
+  await feed.finish(terminal)
+  // Reporting and completion returned while the transport remained blocked.
+  #expect(await sink.blocked)
+  #expect(snapshot.completedChunks == 10_000)
+  #expect(snapshot.downloadedBytes == 10_000)
+  await sink.release()
+  await feed.drain()
+
+  let frames = await sink.frames
+  var chunks: [String] = []
+  var count = 0
+  for frame in frames.dropLast() {
+    let value = try #require(JSONSerialization.jsonObject(with: frame) as? [String: Any])
+    #expect(value["method"] as? String == "operation.progress")
+    let params = try #require(value["params"] as? [String: Any])
+    #expect(params["kind"] as? String == "install")
+    let events = try #require(params["events"] as? [[String: Any]])
+    #expect(!events.isEmpty && events.count <= 128)
+    count += events.count
+    for event in events {
+      if let chunk = event["chunkDownloaded"] as? [String: Any] {
+        chunks.append(try #require(chunk["chunkID"] as? String))
+        #expect((chunk["bytes"] as? NSNumber)?.uint64Value == 1)
+      }
+    }
+  }
+  #expect(count == 10_002)
+  #expect(chunks == (0..<10_000).map(String.init))
+  let finalFrame = try #require(frames.last)
+  let final = try #require(JSONSerialization.jsonObject(with: finalFrame) as? [String: Any])
+  #expect(final["method"] as? String == "operation.finished")
+  #expect(
+    (final["params"] as? [String: Any])?["status"] as? String
+      == (cancelled ? "cancelled" : "completed"))
+}
+
+private final class RPCEncodingProbe: Encodable, @unchecked Sendable {
+  private let lock = NSLock()
+  private var encodes = 0
+  var count: Int { lock.withLock { encodes } }
+
+  func encode(to encoder: any Encoder) throws {
+    lock.withLock { encodes += 1 }
+    var value = encoder.singleValueContainer()
+    try value.encode("probe")
+  }
+}
+
+@Test
+func testTransferRPCBrokenEventWriter() async {
+  let reporter = InstallationReporter(logger: .init(label: "rpc-batch-test"))
+  let feed = await RPCProgressFeed(
+    reporter: reporter, operationID: "job", kind: "install", status: { .null },
+    send: { _ in throw POSIXError(.EPIPE) })
+  await reporter.record(.phaseChanged(.running))
+  await feed.drain()
+  #expect(await reporter.subscribers.isEmpty)
+  await reporter.record(.chunkDownloaded(chunkID: "after-disconnect", bytes: 42))
+  #expect(await reporter.snapshot().downloadedBytes == 42)
+  await feed.finish(.object(["operationID": .string("job"), "status": .string("completed")]))
+}
+
+@Test
+func testTransferRPCReplyPriority() async throws {
+  let sink = RPCBatchTestSink()
+  let watchdog = Task {
+    do {
+      try await Task.sleep(for: .seconds(10))
+      Issue.record("RPC reply sender did not finish")
+      await sink.release()
+    } catch {}
+  }
+  defer { watchdog.cancel() }
+  let output = RPCOutput(writeFrame: { await sink.write($0) })
+  let probe = RPCEncodingProbe()
+  let first = Task { try await output.sendNotification(.encoded(probe)) }
+  await sink.waitUntilBlocked()
+  let buffer = RPCEventBuffer<UpdateEvent>()
+  buffer.append(.phaseChanged(.running))
+  let next = Task {
+    try await output.sendNotification(RPCNotification { .encoded(buffer.take()) })
+  }
+  let reply = Task {
+    try await output.send(Data("{\"jsonrpc\":\"2.0\",\"id\":\"control\",\"result\":true}".utf8))
+  }
+  let deadline = ContinuousClock.now + .seconds(2)
+  var counts = await output.queuedCounts
+  while counts.replies != 1 || counts.notifications != 1, ContinuousClock.now < deadline {
+    await Task.yield()
+    counts = await output.queuedCounts
+  }
+  #expect(counts.replies == 1 && counts.notifications == 1)
+  buffer.append(.phaseChanged(.deleting))
+  await sink.release()
+  try await first.value
+  try await reply.value
+  try await next.value
+  let frames = await sink.frames
+  #expect(probe.count == 1)
+  #expect(frames.count == 3)
+  #expect(String(data: frames[0], encoding: .utf8) == "\"probe\"\n")
+  let response = try #require(JSONSerialization.jsonObject(with: frames[1]) as? [String: Any])
+  #expect(response["id"] as? String == "control")
+  let events = try #require(JSONSerialization.jsonObject(with: frames[2]) as? [[String: Any]])
+  #expect(events.count == 2)
+  #expect((events[0]["phaseChanged"] as? [String: Any])?["_0"] as? String == "running")
+  #expect((events[1]["phaseChanged"] as? [String: Any])?["_0"] as? String == "deleting")
+}
+
+@Test
+func testTransferRPCUpdateEventEncoding() async throws {
+  let buffer = RPCEventBuffer<UpdateEvent>()
+  let file = URL(fileURLWithPath: "/rpc-encoding-fixture")
+  buffer.append(.fileStarted(fileURL: file))
+  buffer.append(.fileCompleted(fileURL: file, bytes: 42, skipped: false))
+  buffer.append(.phaseChanged(.deleting))
+  let value = JSONValue.object([
+    "kind": .string("update"), "events": .encoded(buffer.take()),
+  ])
+  let encoded = try JSONEncoder().encode(value)
+  let params = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+  let events = try #require(params["events"] as? [[String: Any]])
+  #expect(events.count == 3)
+  #expect(
+    (events[0]["fileStarted"] as? [String: Any])?["fileURL"] as? String == file.absoluteString)
+  #expect((events[1]["fileCompleted"] as? [String: Any])?["bytes"] as? Int == 42)
+  #expect((events[2]["phaseChanged"] as? [String: Any])?["_0"] as? String == "deleting")
 }
 
 @Test(arguments: ["stdio", "http"])
