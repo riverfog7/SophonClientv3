@@ -101,7 +101,7 @@ actor BinaryCache {
   private let telemetry: TransferTelemetry?
   private let device: String
   private var headrooms: [UUID: (memory: UInt64, disk: UInt64)] = [:]
-  private var retainedFiles: [URL: (size: UInt64, device: String)] = [:]
+  private var retainedFiles: [String: (size: UInt64, device: String)] = [:]
   private var memoryBytes: UInt64 = 0
   private var diskBytes: UInt64 = 0
   private var inputMemoryBytes: UInt64 = 0
@@ -195,7 +195,7 @@ actor BinaryCache {
           continue
         }
         let freeMemory = memoryLimit - memoryBytes
-        let retained = waiter.fileURL.flatMap { retainedFiles[$0] }
+        let retained = waiter.fileURL.flatMap { retainedFiles[Self.retainedKey($0)] }
         let storedBytes = retained?.size ?? 0
         let freeDisk = diskLimit - diskBytes + storedBytes
         let inMemory: Bool
@@ -209,7 +209,9 @@ actor BinaryCache {
         {
           inMemory = false
           diskBytes = diskBytes - storedBytes + waiter.size
-          if let fileURL = waiter.fileURL { retainedFiles.removeValue(forKey: fileURL) }
+          if let fileURL = waiter.fileURL {
+            retainedFiles.removeValue(forKey: Self.retainedKey(fileURL))
+          }
           telemetry?.release(storedBytes, inMemory: false, device: waiter.device)
         } else {
           continue
@@ -262,11 +264,13 @@ actor BinaryCache {
   }
 
   func restoreDiskFiles(_ files: [URL: UInt64]) throws {
-    let total = files.values.reduce(UInt64(0), +)
+    let sizes = Dictionary(
+      files.map { (Self.retainedKey($0.key), $0.value) }, uniquingKeysWith: max)
+    let total = sizes.values.reduce(UInt64(0), +)
     guard total <= diskLimit - diskBytes else { throw BinaryCacheError.entryTooLarge(total) }
-    for (url, size) in files {
-      let device = telemetry?.register(url, role: "Cache") ?? self.device
-      retainedFiles[url] = (size, device)
+    for (path, size) in sizes {
+      let device = telemetry?.register(URL(fileURLWithPath: path), role: "Cache") ?? self.device
+      retainedFiles[path] = (size, device)
       diskBytes += size
       telemetry?.reserve(size, inMemory: false, device: device)
       telemetry?.stored(size, device: device)
@@ -274,7 +278,7 @@ actor BinaryCache {
   }
 
   func removedRetainedFile(_ url: URL) {
-    guard let retained = retainedFiles.removeValue(forKey: url) else { return }
+    guard let retained = retainedFiles.removeValue(forKey: Self.retainedKey(url)) else { return }
     diskBytes -= retained.size
     telemetry?.release(retained.size, inMemory: false, device: retained.device)
     telemetry?.removed(retained.size, device: retained.device)
@@ -282,6 +286,11 @@ actor BinaryCache {
   }
 
   func clearRetainedFiles() {
-    for url in Array(retainedFiles.keys) { removedRetainedFile(url) }
+    for path in Array(retainedFiles.keys) { removedRetainedFile(URL(fileURLWithPath: path)) }
+  }
+
+  private static func retainedKey(_ url: URL) -> String {
+    url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
+      .appendingPathComponent(url.lastPathComponent).path
   }
 }

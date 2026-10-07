@@ -118,6 +118,35 @@ func testTransferCacheBudgets(memoryLimit: UInt64) async throws {
   try await download.abort()
   try await input.abort()
   try await next.abort()
+
+  // Directory enumeration can return a relative URL for the same retained file.
+  let retainedURL = root.appendingPathComponent("retained.partial")
+  try Data(repeating: 0xA1, count: 16).write(to: retainedURL)
+  let relativeURL = URL(
+    fileURLWithPath: "retained.partial",
+    relativeTo: URL(fileURLWithPath: root.path, isDirectory: true))
+  #expect(relativeURL.path == retainedURL.path)
+  let restored = try BinaryCache(
+    directory: root, memoryLimit: 0, diskLimit: 16, entryLimit: 1)
+  try await restored.restoreDiskFiles([relativeURL: 16])
+  let reopening = Task {
+    try await restored.makeWriter(expectedSize: 16, fileURL: retainedURL, forceDisk: true)
+  }
+  defer { reopening.cancel() }
+  for _ in 0..<50 {
+    if await restored.usage.entries == 1 { break }
+    try await Task.sleep(for: .milliseconds(1))
+  }
+  let admitted = await restored.usage.entries == 1
+  #expect(admitted)
+  if admitted {
+    let writer = try await reopening.value
+    try writer.restoreRanges([0..<16])
+    try (await writer.finish()).remove()
+  } else {
+    reopening.cancel()
+    await #expect(throws: CancellationError.self) { _ = try await reopening.value }
+  }
 }
 
 private final class TransferHTTPFixture: @unchecked Sendable {
