@@ -469,6 +469,10 @@ private func transferTestPlan(
   .timeLimit(.minutes(1)),
   arguments: ["ram", "spill", "resume-ram", "resume-spill", "no-spill", "bad-prefetch"])
 func testTransferWorkingCache(scenario: String) async throws {
+  @Sendable func report(_ stage: String) {
+    FileHandle.standardError.write(Data("[working-cache v2 \(scenario)] \(stage)\n".utf8))
+  }
+  report("setup")
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: root) }
   let bytes = Data(repeating: 0xB7, count: 256 * 1024)
@@ -495,15 +499,31 @@ func testTransferWorkingCache(scenario: String) async throws {
   let prefetch =
     scenario == "bad-prefetch" ? transferTestCache(root.appendingPathComponent("prefetch")) : nil
   if let prefetch {
+    report("prefetch download started")
     let cached = try await prefetch.get(request)
+    report("prefetch download finished")
     try Data(repeating: 0, count: bytes.count).write(to: cached.fileURL)
     try cached.release()
   }
   let transport = transferTestCache(downloads, cachedSource: prefetch)
+  report("workspace initialization started")
   let workspace = try await TransferWorkspace(
     settings: settings, gameDirectory: root, operation: "update", transport: transport)
+  report("workspace initialization finished")
+  let watchdog = Task {
+    try await Task.sleep(for: .seconds(5))
+    let progress = workspace.telemetry.snapshot()
+    let usage = await workspace.cache.usage
+    report(
+      "waiting: entries=\(usage.entries), RAM=\(usage.memory), disk=\(usage.disk), "
+        + "retained=\(progress.retainedBytes), received=\(progress.receivedBytes), "
+        + "HTTP requests=\(fixture.ranges.count)")
+  }
+  defer { watchdog.cancel() }
   do {
+    report("download started")
     let binary = try await workspace.download(request)
+    report("download finished")
     #expect(try binary.data() == bytes)
     #expect(binary.inMemory == (settings.memoryLimit > 0))
     let progress = workspace.telemetry.snapshot()
@@ -522,12 +542,14 @@ func testTransferWorkingCache(scenario: String) async throws {
       #expect(!FileManager.default.fileExists(atPath: working.path))
       #expect(progress.devices.allSatisfy { $0.writtenBytes == 0 && $0.cacheBytes == 0 })
     }
+    report("consumption started")
     try await workspace.consumed(binary, request: request)
     for _ in 0..<50 {
       if await workspace.cache.usage.entries == 0 { break }
       try await Task.sleep(for: .milliseconds(1))
     }
     #expect(await workspace.cache.usage.entries == 0)
+    report("consumption finished: entries=\(await workspace.cache.usage.entries)")
     // Consumption must free capacity even if an async frame still retains the finished value.
     withExtendedLifetime(binary) {}
     #expect(
@@ -537,7 +559,9 @@ func testTransferWorkingCache(scenario: String) async throws {
       !FileManager.default.fileExists(atPath: downloads.appendingPathComponent(key + ".jsonl").path)
     )
   }
+  report("workspace cleanup started")
   try await workspace.finish(completed: true)
+  report("workspace cleanup finished")
   #expect(!FileManager.default.fileExists(atPath: working.path))
   let final = workspace.telemetry.snapshot()
   #expect(final.memoryBytes == 0)
