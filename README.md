@@ -14,11 +14,13 @@ swift build
 
 `GAME` accepts an API game ID or biz. `--cn` selects CN endpoints; `--mode base` selects the base installation scenario. `update --predownload` selects the future branch; `--cache-at PATH` downloads and verifies its diff bundles there, without scanning patch sources, applying patches, or deleting game files. The default source version is detected from the configured executable MD5 and API version records; `--from` overrides it. `update --plan` prints the static manifest plan without modifying game files.
 
-Update uses the installation command's terminal dashboard, showing versions, patch data ready, file progress, skipped targets, repairs, verified output, planned/processed deletions, and the current file. Repair downloads and writes have separate meters. Rates are averages for completed bundles and verified output files, including reused downloads. Use `--plain` for append-only summaries or `--refresh-interval` to adjust refreshes. Progress goes to stderr; `--plan` keeps JSON on stdout.
+Update uses the installation command's terminal dashboard, showing versions, received/retained/remaining patch bytes, verified bundles, file progress, repairs, verified output, and deletions. Network rates count new traffic in this run. Read and write counters/rates update while I/O is happening, grouped by storage volume; target and cache paths on the same volume share one row. RAM reservations and disk cache use update alongside them. These are application I/O counters, not physical device traffic. Use `--plain` for append-only summaries or `--refresh-interval` to adjust refreshes. Progress goes to stderr; `--plan` keeps JSON on stdout.
 
 ## Cache and recovery
 
-Install and update downloads share a persistent cache. Occupied bytes and eviction order are tracked in memory; a revision marker refreshes accounting after another process changes payloads. Received prefixes of 4 MiB HTTP ranges are journaled after writing their bytes, and resumed requests start at those prefixes. Servers that ignore Range requests fall back to a full request. Payload size and MD5 are checked before use; cached predownloads are rechecked when read. Idle completed payloads can be evicted when space is needed; unfinished downloads are retained.
+Each operation has one RAM-first working cache shared by downloaded payloads, original inputs, and repair processing buffers. Data spills to disk only when it cannot fit in RAM. Byte limits and the entry limit provide backpressure, with capacity reserved for consumers so downloads cannot occupy their input space. Consumed data is removed immediately; successful completion removes the whole working directory. Manifest caching, explicit predownloads, and operation state are separate.
+
+Disk spills journal received prefixes of 4 MiB HTTP ranges after writing their bytes. An interrupted run retains unconsumed spills, and resumed requests start at their recorded prefixes. Retained files count against the next run's budget. RAM-only payloads are volatile and must be downloaded again after exiting. Servers that ignore Range requests fall back to a full request. Payload size and MD5 are checked before use; cached predownloads are rechecked when read.
 
 `update --cache-at PATH` stores the complete predownload separately from the bounded fast working cache. Its size is limited by available storage, rather than `--disk-cache-gib`. Resume by repeating the command. The chosen directory is saved with the update state; a later update without `--cache-at` reads and verifies those bundles before downloading missing data through the normal cache. Predownloads remain in their chosen directory after application.
 
@@ -26,9 +28,9 @@ An update only checks and modifies its selected patch targets. It skips targets 
 
 Checkpointed resume is enabled by default. Installation scans once to create its initial plan, then records each completed chunk placement and trim. Restart loads that saved plan and downloads/writes only the remaining placements, without scanning the installation again. An update records each completed target after output verification and replacement. Restart trusts those completed-file receipts and works only on unfinished targets. Initial scanning that stopped before a plan was saved must be repeated.
 
-Completion receipts assume game files have not changed outside the operation. Use `--stateless` for a fresh verification: installation scans its files again, while updating checks its selected patch targets. This discards that operation's saved checkpoints but keeps downloaded payloads. Resume an unfinished operation before starting a different operation type in the same game directory.
+Completion receipts assume game files have not changed outside the operation. Use `--stateless` for a fresh verification: installation scans its files again, while updating checks its selected patch targets before fetching bundles. This discards that operation's checkpoints and working cache; explicit predownloads remain available. A whole bundle is downloaded when any remaining target needs it. Resume an unfinished operation before starting a different operation type in the same game directory.
 
-The default `--write-mode temporary` keeps the existing target until output verification succeeds. Replacement uses a recoverable rename and backup. `--write-mode in-place` preserves the original on the cache drive before overwriting the target. An interrupted active patch restarts from that original; completed files and received download bytes are retained. This is process-exit recovery, not a guarantee against power loss. Keep the cache and state directories until an unfinished update has completed, and resume with the same `--from` version and directories.
+The default `--write-mode temporary` keeps the existing target until output verification succeeds. Replacement uses a recoverable rename and backup. `--write-mode in-place` preserves the original beside the operation state before overwriting the target. These originals share the disk budget and are removed when their consumers finish. An interrupted active patch restarts from its saved original. In-place mode requires disk caching. This is process-exit recovery, not a guarantee against power loss. Keep the cache and state directories until an unfinished update has completed, and resume with the same `--from` version and directories.
 
 Useful options on `install` and `update`:
 
@@ -37,16 +39,17 @@ Useful options on `install` and `update`:
 | `--cache-directory PATH` | User cache directory | Bounded working cache for live downloads and original files |
 | `--cache-at PATH` | Off | Update only: download verified diff bundles here without applying |
 | `--state-directory PATH` | Within cache | Saved plan and per-file checkpoints |
-| `--memory-cache-mib N` | 500 | RAM budget in MiB for original snapshots |
-| `--disk-cache-gib N` | 10 | Limit in GiB for each download/snapshot/original disk pool |
+| `--memory-cache-mib N` | 1024 | Shared working RAM budget in MiB |
+| `--disk-cache-gib N` | 10 | Maximum shared working disk spill in GiB for this operation |
+| `--no-disk-cache` | Off | Disable live working-cache spill; explicit predownloads still use disk |
 | `--cache-entry-limit N` | 500 | Maximum entries admitted to a cache queue |
 | `--io-policy parallel` | Install | Concurrent target file work using configured worker counts |
 | `--io-policy serialized` | Update | One target reader/writer at a time, including repair writes |
 | `--stateless` | Off | Rebuild work from files instead of trusting saved checkpoints |
 
-Originals exceeding the RAM budget spill to disk. In-place originals and originals needed by another update target remain on disk until their consumers finish. Download-cache pins and byte limits provide backpressure while patch workers consume bundles. Insufficient working-cache capacity for one live payload or required originals fails with an error. Unfinished partial downloads are retained rather than evicted; unrelated stale partials may require a larger cache or manual removal when no operation is using it.
+Originals exceeding the RAM budget spill to disk. In-place originals and originals needed by another update target remain available until their consumers finish. Insufficient working-cache capacity for one live payload and its required input fails with an error. Lowering the disk limit can discard download prefixes to fit the new ceiling; recovery originals are never discarded for capacity. Disabling disk caching discards old working downloads and uses RAM for live data.
 
-These are cache-storage limits, not a process memory cap or a total filesystem quota. The RAM limit covers updater original snapshots; manifests, native patch buffers, installer chunks, and HTTP buffers use additional memory. Disk limits count logical payload bytes separately for downloads, transient snapshots, and durable originals. Filesystem allocation, journals/state, and target temporary files add disk use. Lowering a disk limit trims idle completed downloads on first cache access; retained partial downloads or active pins can prevent fitting the new limit.
+These are cache-storage limits, not a process memory cap or a total filesystem quota. RAM reservations cover live payloads, original snapshots, and cached processing output. Manifests, native patch buffers, temporary decompression buffers, and HTTP buffers use additional memory. The disk limit covers shared logical payload reservations, including retained spills and recovery originals. Filesystem allocation, journals/state, target temporary output, and explicit predownloads add disk use.
 
 Updates use serialized target I/O by default, including repair writes. Serialized mode keeps target reads and writes separate, flushing verified output before the next read, while HTTP transfers and cache I/O continue on the cache drive. Installations keep parallel target I/O by default; installer scanning already precedes target writes. Use `--io-policy parallel` to enable the configured update patch worker count. These policies do not measure the hardware or promise a particular throughput.
 
@@ -67,7 +70,7 @@ Start `.build/debug/SophonCLI rpc` for newline-delimited JSON-RPC 2.0 on stdin/s
 
 Operation parameters: `game`, `directory`, optional `cn`, `mode` (`full`/`base`), `voicePacks` and `predownload` (installation), `downloads` (8), `writes` (4), and `transfer`. `sourceVersion` is optional for updates. `predownload: true` selects the future branch, and `cacheOnly: true` downloads verified diff bundles without applying them. `transfer.predownloadDirectory` selects their directory, defaulting to the saved location or `<game>/.sophon-predownload`. `game.version` reports executable-based detection, and `game.nextAction` returns a decision without executing it. Transfer fields use bytes for `memoryLimit` and `diskLimit`, an `entryLimit` of 500 by default, and `writeMode: "temporary"` or `"in-place"`. Set `transfer.preserveState: false` for a fresh verification.
 
-Omitting `transfer.ioPolicy` uses serialized updates and parallel installations. Set it to `"parallel"` to let updates use the `writes` worker count, or `"serialized"` to serialize installation target I/O too.
+Omitting `transfer.ioPolicy` uses serialized updates and parallel installations. Set it to `"parallel"` to let updates use the `writes` worker count, or `"serialized"` to serialize installation target I/O too. `transfer.memoryLimit` defaults to 1 GiB. Set `transfer.diskCacheEnabled: false` to disable working disk spill; explicit predownload storage is independent. Update status includes per-bundle download bytes and per-volume I/O/cache counters under `resources`.
 
 For HTTP, run:
 

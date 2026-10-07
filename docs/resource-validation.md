@@ -1,5 +1,7 @@
 # Real game and resource validation
 
+These measurements predate the shared RAM-first live working cache. References below to persistent download pools, snapshot-only RAM limits, and tmpfs cache-off runs describe the implementation measured at that time. Current cache behavior is documented in the project README.
+
 Tested on Linux on 2026-10-07, using the debug SophonCLI through its stdio JSON-RPC transport. Checks and measurements used the actual game manifests and CDN payloads. No game launch or macOS hardware test is claimed.
 
 ## ZZZ installation and recovery
