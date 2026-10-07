@@ -53,8 +53,107 @@ export interface InstallationProgress extends OperationProgress {
   scannedFiles: number;
   completedFiles: number;
   completedChunks: number;
-  outcome?: unknown;
+  outcome?: OperationOutcome;
 }
+
+export type OperationOutcome =
+  | { completed: Record<string, never> }
+  | { cancelled: Record<string, never> }
+  | { failed: { reason: string } };
+
+export interface DownloadByteProgress {
+  id: string;
+  category: string;
+  totalBytes: number;
+  receivedBytes: number;
+  retainedBytes: number;
+  transferredBytes: number;
+}
+
+export interface StorageByteProgress {
+  id: string;
+  location: string;
+  roles: string[];
+  readBytes: number;
+  writtenBytes: number;
+  cacheBytes: number;
+  reservedCacheBytes: number;
+}
+
+export interface TransferResourceProgress {
+  memoryBytes: number;
+  memoryLimit: number;
+  diskLimit: number;
+  devices: StorageByteProgress[];
+  downloads: DownloadByteProgress[];
+}
+
+export interface UpdateProgress extends OperationProgress {
+  phase: "metadata" | "caching" | "running" | "repairing" | "deleting";
+  outcome?: OperationOutcome;
+  sourceVersion?: string;
+  targetVersion?: string;
+  totalPatchBytes: number;
+  totalInstallBytes: number;
+  totalFiles: number;
+  completedFiles: number;
+  skippedFiles: number;
+  cachedFiles: number;
+  repairFiles: number;
+  deletedBytes: number;
+  totalDeleteFiles: number;
+  totalDeleteBytes: number;
+  processedDeleteFiles: number;
+  totalRepairDownloadBytes: number;
+  totalRepairWriteBytes: number;
+  repairDownloadedBytes: number;
+  repairWrittenBytes: number;
+  receivedPatchBytes: number;
+  retainedPatchBytes: number;
+  transferredPatchBytes: number;
+  remainingPatchBytes: number;
+  resources?: TransferResourceProgress;
+}
+
+// Swift's tagged-enum encoding retains the case and all associated values.
+export type InstallationEvent =
+  | { metadataPlanned: { totalManifests: number } }
+  | { manifestPulled: { matchingField: string; predownload: boolean } }
+  | { scanPlanned: { totalFiles: number; totalChunks: number; totalBytes: number } }
+  | { fileMissing: { filePath: string; chunkCount: number; expectedBytes: number } }
+  | { fileChunkScanned: {
+      filePath: string; chunkID: string; isBroken: boolean; offset: number;
+      bytes: number; expectedBytes: number;
+    } }
+  | { fileScanned: { filePath: string; isBroken: boolean; needsTrimming: boolean } }
+  | { planned: { downloadBytes: number; writeBytes: number; totalChunk: number; totalFile: number } }
+  | { fileTrimmed: { filePath: string } }
+  | { chunkDownloaded: { chunkID: string; bytes: number } }
+  | { retryScheduled: { chunkID: string; attempt: number; reason: string } }
+  | { chunkPostProcessed: { chunkID: string; compressed_bytes: number; uncompressed_bytes: number } }
+  | { chunkWritten: { filePath: string; chunkID: string; offset: number; bytes: number } }
+  | { fileCompleted: { filePath: string } }
+  | { phaseChanged: { _0: InstallationProgress["phase"] } }
+  | { finished: { _0: OperationOutcome } };
+
+export type UpdateEvent =
+  | { planned: {
+      sourceVersion: string; targetVersion: string; patchBytes: number; installBytes: number;
+      totalFiles: number; deleteFiles: number; deleteBytes: number;
+    } }
+  | { bundleDownloaded: { patchID: string; bytes: number } }
+  | { patchDownloadsPlanned: { bytes: number } }
+  | { resourcesUpdated: { _0: TransferResourceProgress } }
+  | { fileStarted: { fileURL: string } }
+  | { repairPlanned: { downloadBytes: number; writeBytes: number } }
+  | { repairDownloaded: { bytes: number } }
+  | { repairWritten: { bytes: number } }
+  | { fileNeedsRepair: { fileURL: string } }
+  | { fileCompleted: { fileURL: string; bytes: number; skipped: boolean } }
+  | { fileCached: { fileURL: string } }
+  | { fileDeleted: { fileURL: string; bytes: number } }
+  | { phaseChanged: { _0: UpdateProgress["phase"] } }
+  | { finished: { _0: OperationOutcome } };
 
 export interface OperationStatus {
   operationID: string;
@@ -62,6 +161,11 @@ export interface OperationStatus {
   progress?: OperationProgress;
   error?: string;
 }
+
+export type OperationProgressBatch = OperationStatus & (
+  | { kind: "install"; events: InstallationEvent[]; progress: InstallationProgress }
+  | { kind: "update"; events: UpdateEvent[]; progress: UpdateProgress }
+);
 
 export interface Notification {
   method: string;
@@ -190,6 +294,16 @@ export class SophonRpcClient {
   onNotification(listener: (notification: Notification) => void | Promise<void>): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
+  }
+
+  onProgressBatch(listener: (batch: OperationProgressBatch) => void | Promise<void>): () => void {
+    return this.onNotification(({ method, params }) => {
+      if (method !== "operation.progress" || !params || typeof params !== "object") return;
+      const batch = params as OperationProgressBatch;
+      if ((batch.kind === "install" || batch.kind === "update") && Array.isArray(batch.events)) {
+        return listener(batch);
+      }
+    });
   }
 
   async call<T = unknown>(

@@ -18,7 +18,7 @@ public enum UpdateOutcome: Codable, Sendable {
   case cancelled
 }
 
-public enum UpdateEvent: Sendable {
+public enum UpdateEvent: Encodable, Sendable {
   case planned(
     sourceVersion: String, targetVersion: String, patchBytes: UInt64, installBytes: UInt64,
     totalFiles: Int, deleteFiles: Int, deleteBytes: UInt64)

@@ -47,6 +47,48 @@ test("fragmented notifications and throwing UI callbacks do not break pending re
   await client.close();
 });
 
+test("progress batches preserve 10,000 events, framing and listener isolation", async () => {
+  const transport = new FakeTransport();
+  const errors = [];
+  const client = SophonRpcClient.fromTransport(transport, {
+    onNotificationError: error => { errors.push(error.message); },
+  });
+  const seen = [];
+  const sizes = [];
+  client.onProgressBatch(async () => { throw new Error("batch UI failure"); });
+  const unsubscribe = client.onProgressBatch(batch => {
+    sizes.push(batch.events.length);
+    for (const event of batch.events) seen.push(Number(event.chunkDownloaded.chunkID));
+  });
+  const pending = client.call("while-events-arrive");
+  await tick();
+  for (let offset = 0; offset < 10_000; offset += 128) {
+    const events = Array.from({ length: Math.min(128, 10_000 - offset) }, (_, index) => ({
+      chunkDownloaded: { chunkID: String(offset + index), bytes: 1 },
+    }));
+    const frame = JSON.stringify({ jsonrpc: "2.0", method: "operation.progress", params: {
+      operationID: "job", status: "running", kind: "install", events,
+      progress: { phase: "running", downloadedBytes: offset + events.length, writtenBytes: 0,
+        scannedFiles: 0, completedFiles: 0, completedChunks: offset + events.length },
+    } }) + "\n";
+    transport.receive(frame.slice(0, 23));
+    transport.receive(frame.slice(23));
+  }
+  transport.reply(transport.frames[0].id, true);
+  assert.equal(await pending, true);
+  await tick();
+  assert.deepEqual(seen, Array.from({ length: 10_000 }, (_, index) => index));
+  assert.equal(sizes.length, 79);
+  assert.equal(sizes.at(-1), 16);
+  assert.equal(errors.length, 79);
+  unsubscribe();
+  transport.receive(JSON.stringify({ jsonrpc: "2.0", method: "operation.progress", params: {
+    operationID: "job", status: "running", progress: { phase: "metadata" },
+  } }) + "\n");
+  assert.equal(sizes.length, 79);
+  await client.close();
+});
+
 test("timeout, abort, RPC failure and process failure reject the appropriate requests", async () => {
   const transport = new FakeTransport();
   const client = SophonRpcClient.fromTransport(transport);
@@ -115,6 +157,7 @@ async function fixture(hung = false) {
       + "function reply(id,result){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,result})+'\\n');}\n"
       + "rl.on('line',line=>{const r=JSON.parse(line);\n"
       + "if(r.method==='rpc.shutdown'){reply(r.id,true);rl.close();process.exit(0);}\n"
+      + "else if(r.method==='events'){for(let i=0;i<1024;i+=128){process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'operation.progress',params:{operationID:'job',status:'running',kind:'install',events:Array.from({length:128},(_,j)=>({chunkDownloaded:{chunkID:String(i+j),bytes:1}})),progress:{phase:'running',downloadedBytes:i+128,writtenBytes:0,scannedFiles:0,completedFiles:0,completedChunks:i+128}}})+'\\n');}reply(r.id,1024);}\n"
       + "else if(r.method==='operation.wait'){waiting=r.id;}\n"
       + "else if(r.method==='operation.cancel'){reply(r.id,true);reply(waiting,{operationID:'job',status:'cancelled'});}\n"
       + "else reply(r.id,{operationID:'job'});});\n";
@@ -127,6 +170,10 @@ test("Node stdio supports concurrent wait/cancel, process errors and forced shut
   const hung = await fixture(true);
   try {
     const client = NodeClient.stdio(normal.file);
+    const seen = [];
+    client.onProgressBatch(batch => { for (const event of batch.events) seen.push(Number(event.chunkDownloaded.chunkID)); });
+    assert.equal(await client.call("events"), 1024);
+    assert.deepEqual(seen, Array.from({ length: 1024 }, (_, index) => index));
     const waiting = client.wait("job");
     assert.equal(await client.cancel("job"), true);
     assert.equal((await waiting).status, "cancelled");
@@ -207,6 +254,10 @@ test("Neutralino 3.8/4.11 process APIs preserve quoting, framing and shutdown", 
     assert.ok(bridge.command.includes("'literal$()'"));
     bridge.emit({ id: 900, action: "stdOut", data: "not our process\n" });
     bridge.emit({ id: 1, action: "stdErr", data: "fixture stderr" });
+    const seen = [];
+    client.onProgressBatch(batch => { for (const event of batch.events) seen.push(Number(event.chunkDownloaded.chunkID)); });
+    assert.equal(await client.call("events"), 1024);
+    assert.deepEqual(seen, Array.from({ length: 1024 }, (_, index) => index));
     const waiting = client.wait("job");
     assert.equal(await client.cancel("job"), true);
     assert.equal((await waiting).status, "cancelled");

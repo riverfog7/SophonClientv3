@@ -17,7 +17,7 @@ public enum InstallationOutcome: Codable, Sendable {
   case cancelled
 }
 
-public enum InstallationEvent: Sendable {
+public enum InstallationEvent: Encodable, Sendable {
   // metadata stage
   case metadataPlanned(totalManifests: Int)
   case manifestPulled(matchingField: String, predownload: Bool)
