@@ -6,6 +6,7 @@ on:
 
 jobs:
   transfer:
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -13,8 +14,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - name: Import Swift signing keys
+        if: runner.os == 'Linux'
+        shell: bash
+        run: curl --fail --silent --show-error --location https://www.swift.org/keys/all-keys.asc | gpg --batch --import
       - uses: swift-actions/setup-swift@v3
         with:
           swift-version: "6.3.3"
-      - run: swift build
-      - run: swift test --filter 'testStreamedPatchWithCachedInputs|testTransfer'
+      - name: Build CLI and tests once
+        run: swift build --build-tests
+      - name: Run transfer tests
+        timeout-minutes: 5
+        run: swift test --skip-build --filter 'testStreamedPatchWithCachedInputs|testTransfer'
