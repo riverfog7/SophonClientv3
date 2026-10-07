@@ -68,7 +68,7 @@ Start `.build/debug/SophonCLI rpc` for newline-delimited JSON-RPC 2.0 on stdin/s
 {"jsonrpc":"2.0","id":4,"method":"operation.cancel","params":{"operationID":"ID_FROM_START"}}
 ```
 
-`install.start` and `update.start` return an operation ID immediately. Stdio emits `operation.progress` and `operation.finished` notifications. `operation.wait` waits for the final status; cancellation remains available while it waits. Status for the most recent 128 completed operations is kept in the process. `state.inspect` needs only `directory`, optional `transfer`, and optional `operation` (`update` by default or `install`); it reads persisted state without contacting the API.
+`install.start` and `update.start` return an operation ID immediately. Stdio emits `operation.progress` and `operation.finished` notifications. `operation.wait` waits for the final status; check `status === "completed"` because failed and cancelled operations also return a status. Cancellation remains available while it waits. Installation progress includes `totalDownloadBytes`, `totalWriteBytes`, `downloadedBytes`, `writtenBytes`, and the reporter's file/chunk counts. Totals can be absent until the plan is known. Status for the most recent 128 completed operations is kept in the process. `state.inspect` needs only `directory`, optional `transfer`, and optional `operation` (`update` by default or `install`); it reads persisted state without contacting the API.
 
 Operation parameters: `game`, `directory`, optional `cn`, `mode` (`full`/`base`), `voicePacks` and `predownload` (installation), `downloads` (8), `writes` (4), and `transfer`. `sourceVersion` is optional for updates. `predownload: true` selects the future branch, and `cacheOnly: true` downloads verified diff bundles without applying them. `transfer.predownloadDirectory` selects their directory, defaulting to the saved location or `<game>/.sophon-predownload`. `game.version` reports executable-based detection, and `game.nextAction` returns a decision without executing it. Transfer fields use bytes for `memoryLimit` and `diskLimit`, an `entryLimit` of 500 by default, and `writeMode: "temporary"` or `"in-place"`. Set `transfer.preserveState: false` for a fresh verification.
 
@@ -81,6 +81,8 @@ For HTTP, run:
 ```
 
 The CLI emits an `rpc.listening` message containing its localhost URL. POST JSON requests to that URL with `Content-Type: application/json` and, when configured, `Authorization: Bearer YOUR_TOKEN`. HTTP notifications return 204; poll `operation.status` for progress. Both transports limit requests to 1 MiB and batches to 128 entries. Stdio remains the default transport.
+
+For browser clients, add `--allow-origin http://localhost:5173` using the frontend's exact origin. Repeat the option for additional origins. HTTP responds to JSON/bearer CORS preflights and rejects origins that are not explicitly permitted; browser origins are disabled by default. Neutralino stdio does not require CORS.
 
 Metadata methods include `api.games`, `api.configs`, `api.branches`, `api.scanInfo`, `api.wpfPackages`, `api.resolveGame`, `api.gameInfo`, `api.lookupVersion`, `api.compareBranches`, `api.checkUpdatePath`, `api.sophonBuild`, and `api.sophonPatchBuild`. All accept named parameters and optional `cn`. Game-specific methods accept `game`; `resolveGame` accepts `query`, `lookupVersion` accepts `md5`, and `checkUpdatePath` accepts `sourceVersion`. Language/search/version/predownload filters correspond to the CLI metadata commands.
 
@@ -100,4 +102,4 @@ Linux/macOS CI runs this focused suite. Existing live-manifest tests can be run 
 
 Version detection uses `exe_file_name` from the launch configuration and version/MD5 records from the API. Multiple versions sharing one executable hash require matching completed installation history or an explicit source override. Source-file integrity is checked by the update pipeline; it does not require a full installation scan before choosing an action.
 
-The [TypeScript client](rpc-client/README.md) exposes both transports with no runtime dependencies.
+The [TypeScript client](rpc-client/README.md) provides browser/React HTTP, Node stdio, and Yaagl-compatible Neutralino stdio entry points with no runtime dependencies. Notification callback errors are isolated, and stdio shutdown has bounded termination fallbacks.
