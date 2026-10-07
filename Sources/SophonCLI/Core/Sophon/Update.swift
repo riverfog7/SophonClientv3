@@ -24,7 +24,7 @@ struct TransferCLIOptions: ParsableArguments, Sendable {
   @Option(help: "Update output mode: temporary replacement or in-place overwrite.")
   var writeMode: UpdateWriteMode = .temporaryReplacement
   @Flag(
-    help: "Rebuild progress from files instead of using saved checkpoints; downloads remain cached."
+    help: "Rebuild update progress from target files instead of using saved checkpoints."
   )
   var stateless = false
 
@@ -272,6 +272,12 @@ private actor UpdateDashboard {
   private var latest = "Loading game configuration and branches"
   private var currentFile: String?
   private var downloads = InstallMeter()
+  private var network = InstallMeter()
+  private var patchNetwork = InstallMeter()
+  private var resources: TransferResourceProgress?
+  private var deviceReads: [String: InstallMeter] = [:]
+  private var deviceWrites: [String: InstallMeter] = [:]
+  private var verifiedPatchBytes: UInt64 = 0
   private var files = InstallMeter()
   private var writes = InstallMeter()
   private var repairDownloads = InstallMeter()
@@ -315,8 +321,27 @@ private actor UpdateDashboard {
       totalDeleteBytes = bytes
     case .bundleDownloaded(let id, let bytes):
       bundles += 1
-      downloads.advance(bytes, at: time)
+      verifiedPatchBytes += bytes
       latest = "Bundle ready: \(id)"
+    case .patchDownloadsPlanned(let bytes):
+      downloads.setTotal(bytes, at: time)
+    case .resourcesUpdated(let progress):
+      resources = progress
+      downloads.value = progress.receivedBytes
+      patchNetwork.value = progress.transferredBytes
+      network.value = progress.downloads.reduce(0) { $0 + $1.transferredBytes }
+      patchNetwork.sample(at: time)
+      network.sample(at: time)
+      for device in progress.devices {
+        var reads = deviceReads[device.id] ?? InstallMeter()
+        var writes = deviceWrites[device.id] ?? InstallMeter()
+        reads.value = device.readBytes
+        writes.value = device.writtenBytes
+        reads.sample(at: time)
+        writes.sample(at: time)
+        deviceReads[device.id] = reads
+        deviceWrites[device.id] = writes
+      }
     case .fileStarted(let path):
       currentFile = fileName(path)
     case .fileNeedsRepair(let path):
@@ -355,6 +380,8 @@ private actor UpdateDashboard {
       phaseStart = time
       if next == .running || next == .caching {
         downloads.start(at: time)
+        patchNetwork.start(at: time)
+        network.start(at: time)
         files.start(at: time)
         writes.start(at: time)
       }
@@ -390,6 +417,10 @@ private actor UpdateDashboard {
       downloads.setTotal(downloads.value, at: time)
     }
     downloads.finish(at: time)
+    patchNetwork.finish(at: time)
+    network.finish(at: time)
+    for id in deviceReads.keys { deviceReads[id]?.finish(at: time) }
+    for id in deviceWrites.keys { deviceWrites[id]?.finish(at: time) }
     files.finish(at: time)
     writes.finish(at: time)
     repairDownloads.finish(at: time)
@@ -416,7 +447,11 @@ private actor UpdateDashboard {
     case .failed?: status = "FAILED"
     case nil: status = cancelling ? "CANCELLING..." : phase.rawValue.uppercased()
     }
-    let estimates = [downloads, files].map { eta($0, at: time) }
+    let patchRemaining = (downloads.total ?? 0) - min(downloads.total ?? 0, downloads.value)
+    let patchRate = patchNetwork.rate(at: time)
+    let patchETA: Double? =
+      downloads.done ? 0 : patchRate.flatMap { $0 > 0 ? Double(patchRemaining) / $0 : nil }
+    let estimates = [patchETA, eta(files, at: time)]
     let remaining = estimates.allSatisfy { $0 != nil } ? estimates.compactMap { $0 }.max() : nil
     var lines = [
       "  SOPHON / UPDATE",
@@ -425,19 +460,24 @@ private actor UpdateDashboard {
       cacheAt.map { "  Cache at  \(installText($0, limit: 63))" }
         ?? "  Output  \(writeMode == .inPlace ? "In-place" : "Temporary replacement") | \(ioPolicy == .serialized ? "Sequential" : "Parallel") I/O",
       "  Version  \(installText(version, limit: 65))",
-      "",
       "  \(status)",
       "  Stage \(installDuration(time - phaseStart))   Total \(installDuration(time))   ETA \(installDuration(remaining))",
-      "",
     ]
     if phase == .repairing || repairDownloads.total != nil {
       lines.append(
-        "  Patch data ready  \(installBytes(Double(downloads.value))) (\(bundles) bundles)")
+        "  Patch data verified  \(installBytes(Double(verifiedPatchBytes))) (\(bundles) bundles)")
       lines += byteRows("Repair data", repairDownloads, at: time)
       lines += byteRows("Repair write", repairWrites, at: time)
     } else {
-      lines += byteRows("Patch data", downloads, at: time)
-      lines.append("  Bundles ready  \(bundles)")
+      lines.append(progressRow("Patch data", downloads, at: time))
+      lines.append(
+        "  \(installBytes(Double(downloads.value))) / \(downloads.total.map { installBytes(Double($0)) } ?? "—") received   Net \(installSpeed(patchRate))"
+      )
+      lines.append(
+        "  Remaining \(installBytes(Double(patchRemaining)))   Retained \(installBytes(Double(resources?.retainedBytes ?? 0)))"
+      )
+      lines.append(
+        "  Verified \(installBytes(Double(verifiedPatchBytes)))   Bundles ready \(bundles)")
     }
     lines += [
       progressRow(cacheAt == nil ? "Files" : "Cached files", files, at: time),
@@ -453,11 +493,28 @@ private actor UpdateDashboard {
         "  Delete entries  \(deletions.value) / \(deletions.total.map(String.init) ?? "—")   Planned \(installBytes(Double(totalDeleteBytes)))   Removed \(installBytes(Double(deletedBytes)))"
       )
     }
-    lines += [
-      "",
-      "  \(currentFile == nil ? "Latest" : "File")  \(installText(currentFile ?? latest, limit: 65))",
-      "  Ready totals include cached bundles; output counts verified files.",
-    ]
+    lines.append(
+      "  Network \(installBytes(Double(network.value))) new bytes   \(installSpeed(network.rate(at: time)))"
+    )
+    if let resources {
+      let reserved = resources.devices.reduce(UInt64(0)) { $0 + $1.reservedCacheBytes }
+      lines.append(
+        "  RAM cache \(installBytes(Double(resources.memoryBytes))) / \(installBytes(Double(resources.memoryLimit)))"
+          + (cacheAt == nil
+            ? "   Spill reserved \(installBytes(Double(reserved))) / \(installBytes(Double(resources.diskLimit)))"
+            : ""))
+      for device in resources.devices {
+        lines.append(
+          "  Storage \(installText(device.location, limit: 25)) [\(device.roles.joined(separator: "+"))]   Cache \(installBytes(Double(device.cacheBytes)))"
+        )
+        lines.append(
+          "  Read \(installBytes(Double(device.readBytes))) \(installSpeed(deviceReads[device.id]?.rate(at: time)))   Write \(installBytes(Double(device.writtenBytes))) \(installSpeed(deviceWrites[device.id]?.rate(at: time)))"
+        )
+      }
+    }
+    lines.append(
+      "  \(currentFile == nil ? "Latest" : "File")  \(installText(currentFile ?? latest, limit: 65))"
+    )
     if case .failed(let reason)? = outcome {
       lines.append("  Error  \(installText(reason, limit: 500))")
     }
