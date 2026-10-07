@@ -1,0 +1,148 @@
+{
+  "zzz-data-ssd-final": {
+    "durationSeconds": 190.74646079004742,
+    "throughputMiBPerSecond": 22.085749820405848,
+    "peakRSSMiB": 121.2109375,
+    "averageCPUPercent": 125.33391131337518,
+    "peakDownloadLogicalBytes": 1073732275,
+    "peakDownloadAllocatedBytes": 1075634176,
+    "sampleCount": 184,
+    "limitViolations": 0,
+    "minimumFreeGiB": 145.0979881286621
+  },
+  "zzz-data-1m": {
+    "durationSeconds": 211.9914021899458,
+    "throughputMiBPerSecond": 19.872403166436726,
+    "peakRSSMiB": 127.40234375,
+    "averageCPUPercent": 121.52851358054686,
+    "peakDownloadLogicalBytes": 1073738325,
+    "peakDownloadAllocatedBytes": 1075585024,
+    "sampleCount": 203,
+    "limitViolations": 0,
+    "minimumFreeGiB": 159.2317657470703
+  },
+  "zzz-data-slow-target-resume": {
+    "durationSeconds": 179.87952222302556,
+    "throughputMiBPerSecond": 16.538598695954033,
+    "peakRSSMiB": 155.6875,
+    "averageCPUPercent": 105.83194665369842,
+    "peakDownloadLogicalBytes": 1073733754,
+    "peakDownloadAllocatedBytes": 1075605504,
+    "sampleCount": 172,
+    "limitViolations": 0,
+    "minimumFreeGiB": 153.24936294555664
+  },
+  "zzz-data-slow-shared": {
+    "durationSeconds": 594.1636323329294,
+    "throughputMiBPerSecond": 7.0902666923516495,
+    "peakRSSMiB": 127.62890625,
+    "averageCPUPercent": 47.16882433540818,
+    "peakDownloadLogicalBytes": 1073735775,
+    "peakDownloadAllocatedBytes": 1075658752,
+    "sampleCount": 567,
+    "limitViolations": 0,
+    "minimumFreeGiB": 141.00120162963867
+  },
+  "serializedUpdater": {
+    "verifiedTargets": 10,
+    "durationSeconds": 196.69890715403017,
+    "peakRSSMiB": 84.8046875,
+    "averageCPUPercent": 20.81353709196812,
+    "allPatchPayloadsReadySeconds": 7.10918443009723,
+    "targetReadBytes": 1839202304,
+    "targetWriteBytes": 1952550912,
+    "snapshotLogicalPeak": 430973352,
+    "downloadLogicalPeak": 279690934,
+    "repairFiles": 0
+  },
+  "checks": {
+    "zzzSelectedFilesVerified": {
+      "zzz-data-1m": {
+        "verifiedFiles": 57,
+        "bytes": 4432376366,
+        "seconds": 9.55624165199697
+      },
+      "zzz-data-ssd-resume": {
+        "verifiedFiles": 57,
+        "bytes": 4432376366,
+        "seconds": 10.10498866008129
+      },
+      "zzz-data-slow-target-resume": {
+        "verifiedFiles": 57,
+        "bytes": 4432376366,
+        "seconds": 7.347042720997706
+      },
+      "zzz-data-ssd-final": {
+        "verifiedFiles": 57,
+        "bytes": 4432376366
+      },
+      "zzz-data-slow-shared": {
+        "verifiedFiles": 57,
+        "bytes": 4432376366
+      }
+    },
+    "patchTargetsVerified": {
+      "patch-500m": {
+        "verified": 10,
+        "expected": "target"
+      },
+      "patch-1m": {
+        "verified": 10,
+        "expected": "target"
+      },
+      "patch-tiny": {
+        "verified": 10,
+        "expected": "original"
+      },
+      "patch-in-place-tiny": {
+        "verified": 10,
+        "expected": "original"
+      },
+      "patch-cache-tiny": {
+        "verified": 10,
+        "expected": "original"
+      },
+      "limits": {
+        "patch-500m": {
+          "downloads": 279690934,
+          "snapshots": 430973352,
+          "originals": 0
+        },
+        "patch-1m": {
+          "downloads": 279690934,
+          "snapshots": 684700520,
+          "originals": 0
+        },
+        "patch-tiny": {
+          "downloads": 0,
+          "snapshots": 0,
+          "originals": 0
+        },
+        "patch-in-place-tiny": {
+          "downloads": 100181823,
+          "snapshots": 0,
+          "originals": 0
+        },
+        "patch-cache-tiny": {
+          "downloads": 0,
+          "snapshots": 0,
+          "originals": 0
+        }
+      },
+      "patch-shrink-before": {
+        "verified": 1,
+        "expected": "target"
+      },
+      "patch-shrink-after": {
+        "verified": 1,
+        "expected": "target"
+      },
+      "patch-small-disk": {
+        "verified": 10,
+        "expected": "target"
+      }
+    },
+    "focusedTestCases": 23,
+    "protectedArchiveBytes": 156771665920
+  }
+}

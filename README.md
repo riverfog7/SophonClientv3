@@ -41,6 +41,8 @@ Useful options on `install` and `update`:
 
 Originals exceeding the RAM budget spill to disk. In-place originals and originals needed by another update target remain on disk until their consumers finish. Download-cache pins and byte limits provide backpressure while patch workers consume bundles. Insufficient capacity for one payload, required originals, or a complete predownload fails with an error. Unfinished partial downloads are retained rather than evicted; unrelated stale partials may require a larger cache or manual removal when no operation is using it.
 
+These are cache-storage limits, not a process memory cap or a total filesystem quota. The RAM limit covers updater original snapshots; manifests, native patch buffers, installer chunks, and HTTP buffers use additional memory. Disk limits count logical payload bytes separately for downloads, transient snapshots, and durable originals. Filesystem allocation, journals/state, and target temporary files add disk use. Lowering a disk limit trims idle completed downloads on first cache access; retained partial downloads or active pins can prevent fitting the new limit.
+
 Serialized mode keeps target reads and writes separate, flushing verified output before the next read, while HTTP transfers and cache I/O continue on the fast drive. Installer scanning already precedes target writes. Parallel mode uses the configured download/write counts. These policies do not measure the hardware or promise a particular throughput.
 
 SIGINT/SIGTERM cancel queued work and drain an active native patch write before exiting. A forced kill retains the last recorded state. Separate processes cannot modify the same game directory concurrently.
@@ -78,11 +80,11 @@ Local transfer, native patch, and RPC tests stay in the existing test file and d
 swift test --filter 'testStreamedPatchWithCachedInputs|testTransfer'
 ```
 
-Linux/macOS CI runs this focused suite. Existing live-manifest tests can be run separately.
+Linux/macOS CI runs this focused suite. Existing live-manifest tests can be run separately. Real ZZZ repair, cache-budget measurements, and throttled-storage results are recorded in [resource validation](docs/resource-validation.md).
 
 ## Selecting the next action
 
-`next-action GAME DIR` and `game.nextAction` inspect saved operations before executable version detection. Matching unfinished installations/updates resume using their saved plans; a partial applied operation targeting an obsolete version is reconciled using the live installation manifest. Known older versions with an advertised diff update to live. An up-to-date installation caches an available future update, unless its payloads are already present. Cache-only receipts never establish an installed version. The decision contains action, source/target versions, branch, cache-only flag, scenario, voice packs and reason.
+`next-action GAME DIR` and `game.nextAction` inspect saved operations before executable version detection. Matching unfinished installations/updates resume using their saved plans; a partial applied operation targeting an obsolete version is reconciled using the live installation manifest. Known older versions update to live when incremental patches are supported and a diff is advertised; otherwise, the decision selects installation. An up-to-date installation caches an available future update, unless its payloads are already present. Cache-only receipts never establish an installed version. The decision contains action, source/target versions, branch, cache-only flag, scenario, voice packs and reason.
 
 Version detection uses `exe_file_name` from the launch configuration and version/MD5 records from the API. Multiple versions sharing one executable hash require matching completed installation history or an explicit source override. Source-file integrity is checked by the update pipeline; it does not require a full installation scan before choosing an action.
 
