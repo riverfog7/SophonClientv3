@@ -341,6 +341,10 @@ final class Installer: Sendable {
         settings: transferSettings, gameDirectory: baseGameDir, operation: "install",
         transport: transport)
     }
+    if providedWorkspace == nil {
+      try await workspace.retainOnlyDownloads(
+        plan.requiredChunks.map { try $0.downloadRequest() })
+    }
     await reporter?.record(.phaseChanged(.running))
     let requiredChunks = AsyncChannel<RequiredChunk>()
     let downloadedChunks = AsyncChannel<DownloadedChunk>()

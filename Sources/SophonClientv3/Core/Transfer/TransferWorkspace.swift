@@ -75,6 +75,25 @@ final class TransferWorkspace: Sendable {
       request, directory: directory.appendingPathComponent("downloads", isDirectory: true))
   }
 
+  func retainOnlyDownloads(_ requests: [DownloadRequest]) async throws {
+    let keys = Set(requests.map { transferKey("\($0.md5.lowercased()):\($0.size)") })
+    let downloads = directory.appendingPathComponent("downloads", isDirectory: true)
+    let removed = try await runTransferIO {
+      guard FileManager.default.fileExists(atPath: downloads.path) else { return [URL]() }
+      var removed: [URL] = []
+      for file in try FileManager.default.contentsOfDirectory(
+        at: downloads, includingPropertiesForKeys: nil)
+      where (file.pathExtension == "partial" || file.pathExtension == "jsonl")
+        && !keys.contains(file.deletingPathExtension().lastPathComponent)
+      {
+        try removeOwnedFile(file)
+        removed.append(file)
+      }
+      return removed
+    }
+    for file in removed { await cache.removedRetainedFile(file) }
+  }
+
   func consumed(_ binary: CachedBinary, request: DownloadRequest) async throws {
     try await runTransferIO(checkCancellation: false) {
       try binary.removeFile()

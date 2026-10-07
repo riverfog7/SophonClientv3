@@ -232,6 +232,13 @@ private final class UpdateExecution: Sendable {
     let bundles = plan.patchBundles.filter { bundle in
       bundle.patches.contains { !recovered.contains($0.target.fileURL) }
     }
+    if !cacheOnly {
+      var requests = try bundles.map { try $0.downloadRequest() }
+      for file in await repairs.all() {
+        requests += try file.installChunks.map { try $0.downloadRequest() }
+      }
+      try await workspace.retainOnlyDownloads(requests)
+    }
     await reporter.record(.patchDownloadsPlanned(bytes: bundles.reduce(0) { $0 + $1.patchSize }))
     for bundle in bundles {
       let request = try bundle.downloadRequest()
