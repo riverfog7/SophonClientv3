@@ -31,6 +31,31 @@ func transferKey(_ value: String) -> String {
   SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
 }
 
+// Quota scans need only size and time, without owner-name or extended-attribute queries.
+func transferFileMetadata(_ path: String) throws -> (size: UInt64, modified: Date) {
+  #if canImport(Darwin) || canImport(Glibc)
+    var info = stat()
+    guard lstat(path, &info) == 0 else {
+      throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    #if canImport(Darwin)
+      let time = info.st_mtimespec
+    #else
+      let time = info.st_mtim
+    #endif
+    return (
+      UInt64(max(0, info.st_size)),
+      Date(timeIntervalSince1970: Double(time.tv_sec) + Double(time.tv_nsec) / 1_000_000_000)
+    )
+  #else
+    let attributes = try FileManager.default.attributesOfItem(atPath: path)
+    return (
+      (attributes[.size] as? NSNumber)?.uint64Value ?? 0,
+      attributes[.modificationDate] as? Date ?? .distantPast
+    )
+  #endif
+}
+
 struct FileDigest: Sendable {
   let size: UInt64
   let md5: String

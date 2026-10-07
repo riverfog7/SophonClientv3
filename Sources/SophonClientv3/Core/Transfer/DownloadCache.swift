@@ -23,6 +23,8 @@ actor DownloadCache {
   private let retryInterval: Int
   private let http: RangeDownloadSession
   private let requests: WorkLimiter
+  private let budget: DownloadBudget
+  private let budgetOperations = WorkLimiter(limit: 1)
   private var checkedInitialCapacity = false
 
   init(
@@ -31,6 +33,7 @@ actor DownloadCache {
   ) {
     self.directory = directory
     self.diskLimit = diskLimit
+    budget = DownloadBudget(directory: directory, limit: diskLimit)
     self.maxRetries = maxRetries
     self.retryInterval = retryInterval
     configuration.httpMaximumConnectionsPerHost = maxConcurrentDownloads
@@ -118,13 +121,7 @@ actor DownloadCache {
       }
     }
     if FileManager.default.fileExists(atPath: paths.ready.path) {
-      let budgetLock = try await acquireLock(directory.appendingPathComponent("budget.lock"))
-      try await runTransferIO {
-        try removeOwnedFile(paths.ready)
-        try removeOwnedFile(paths.partial)
-        try removeOwnedFile(paths.index)
-        withExtendedLifetime(budgetLock) {}
-      }
+      try await withBudget { try $0.remove(paths) }
     }
 
     while true {
@@ -231,56 +228,138 @@ actor DownloadCache {
   private func reserveSpace(
     _ size: UInt64, key: String, paths: DownloadPaths, createPartial: Bool = true
   ) async throws {
-    let budgetLock = try await acquireLock(directory.appendingPathComponent("budget.lock"))
-    defer { withExtendedLifetime(budgetLock) {} }
-    let directory = directory
-    let diskLimit = diskLimit
-    try await runTransferIO {
-      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      // Listing names avoids fetching resource values for journals and lock files.
-      // File attributes also avoid Foundation's per-entry URL resource conversion.
-      let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
-      var used: UInt64 = 0
-      var activeCapacity = false
-      var candidates: [(URL, UInt64, Date)] = []
-      for name in names where name.hasSuffix(".bin") || name.hasSuffix(".partial") {
-        let file = directory.appendingPathComponent(name)
-        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
-        let bytes = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        used += bytes
-        if file.pathExtension == "bin", file.deletingPathExtension().lastPathComponent != key {
-          candidates.append((file, bytes, attributes[.modificationDate] as? Date ?? .distantPast))
-        } else if file.pathExtension == "partial",
-          file.deletingPathExtension().lastPathComponent != key
-        {
-          let path = file.deletingPathExtension().appendingPathExtension("lock")
-          do {
-            let lock = try TransferFileLock(path)
-            withExtendedLifetime(lock) {}
-          } catch TransferLockError.busy { activeCapacity = true }
-        }
-      }
-      let existing = FileManager.default.fileExists(atPath: paths.partial.path)
-      let required = existing ? 0 : size
-      for candidate in candidates.sorted(by: { $0.2 < $1.2 }) where used > diskLimit - required {
-        let key = candidate.0.deletingPathExtension().lastPathComponent
-        let other = DownloadPaths(directory: directory, key: key)
-        let lock: TransferFileLock
-        do { lock = try TransferFileLock(other.lock) } catch TransferLockError.busy {
-          activeCapacity = true
+    try await withBudget {
+      try $0.reserve(size, key: key, paths: paths, createPartial: createPartial)
+    }
+  }
+
+  private func finish(context: DownloadContext, paths: DownloadPaths) async throws {
+    try await withBudget(checkCancellation: false) { budget in
+      context.close()
+      try budget.finish(paths)
+    }
+  }
+
+  private func withBudget(
+    checkCancellation: Bool = true, _ operation: @escaping @Sendable (DownloadBudget) throws -> Void
+  ) async throws {
+    try await budgetOperations.withPermit {
+      let lock = try await self.acquireLock(self.directory.appendingPathComponent("budget.lock"))
+      defer { withExtendedLifetime(lock) {} }
+      try await runTransferIO(checkCancellation: checkCancellation) { try operation(self.budget) }
+    }
+  }
+}
+
+// Accessed only while the caller holds budget.lock, including across processes.
+private final class DownloadBudget: @unchecked Sendable {
+  private struct Entry {
+    let size: UInt64
+    let modified: Date
+  }
+
+  private let directory: URL
+  private let limit: UInt64
+  private var occupied: UInt64 = 0
+  private var entries: [String: Entry] = [:]
+  private var ready: [String] = []
+  private var revision: Data?
+  private var loaded = false
+
+  init(directory: URL, limit: UInt64) {
+    self.directory = directory
+    self.limit = limit
+  }
+
+  private func refresh() throws {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let versionURL = directory.appendingPathComponent("budget.version")
+    let version: Data?
+    do { version = try Data(contentsOf: versionURL) } catch {
+      if !isMissingFile(error) { throw error }
+      version = nil
+    }
+    guard !loaded || revision != version else { return }
+    var current: [String: Entry] = [:]
+    var bytes: UInt64 = 0
+    for name in try FileManager.default.contentsOfDirectory(atPath: directory.path)
+    where name.hasSuffix(".bin") || name.hasSuffix(".partial") {
+      let metadata = try transferFileMetadata(directory.path + "/" + name)
+      current[name] = Entry(size: metadata.size, modified: metadata.modified)
+      bytes += metadata.size
+    }
+    entries = current
+    occupied = bytes
+    ready = current.keys.filter { $0.hasSuffix(".bin") }.sorted {
+      current[$0]!.modified < current[$1]!.modified
+    }
+    revision = version
+    loaded = true
+  }
+
+  // Change the marker before touching payloads. A killed writer leaves other indexes stale,
+  // so the next holder of budget.lock reconstructs accounting from the actual files.
+  private func mutate(_ operation: () throws -> Void) throws {
+    let version = Data(UUID().uuidString.utf8)
+    try version.write(to: directory.appendingPathComponent("budget.version"), options: .atomic)
+    loaded = false
+    try operation()
+    revision = version
+    loaded = true
+  }
+
+  func reserve(_ size: UInt64, key: String, paths: DownloadPaths, createPartial: Bool) throws {
+    try refresh()
+    let partialName = paths.partial.lastPathComponent
+    let existing = FileManager.default.fileExists(atPath: paths.partial.path)
+    // Recover accounting if a caller removed its partial outside the cache protocol.
+    if (entries[partialName] != nil) != existing {
+      loaded = false
+      try refresh()
+    }
+    let required = existing ? 0 : size
+    var remaining = occupied
+    var victims: [String] = []
+    var locks: [TransferFileLock] = []
+    var active = false
+    defer { withExtendedLifetime(locks) {} }
+    if remaining > limit - required {
+      for name in ready {
+        guard remaining > limit - required else { break }
+        let otherKey = String(name.dropLast(4))
+        guard otherKey != key else { continue }
+        let other = DownloadPaths(directory: directory, key: otherKey)
+        do { locks.append(try TransferFileLock(other.lock)) } catch TransferLockError.busy {
+          active = true
           continue
         }
-        defer { withExtendedLifetime(lock) {} }
-        try removeOwnedFile(candidate.0)
+        victims.append(name)
+        remaining -= entries[name]!.size
+      }
+    }
+    if remaining > limit - required {
+      for name in entries.keys where name.hasSuffix(".partial") {
+        let otherKey = String(name.dropLast(8))
+        guard otherKey != key else { continue }
+        do {
+          let lock = try TransferFileLock(DownloadPaths(directory: directory, key: otherKey).lock)
+          withExtendedLifetime(lock) {}
+        } catch TransferLockError.busy { active = true }
+      }
+      if active { throw DownloadCacheError.capacityBusy }
+      throw SophonClientError.UnknownError(
+        "Download cache is full of active or partial downloads; increase its limit or resume them")
+    }
+    guard !victims.isEmpty || (!existing && createPartial) else { return }
+    try mutate {
+      for name in victims {
+        let other = DownloadPaths(directory: directory, key: String(name.dropLast(4)))
+        try removeOwnedFile(other.ready)
         try removeOwnedFile(other.index)
-        used -= candidate.1
+        occupied -= entries.removeValue(forKey: name)!.size
       }
-      guard used <= diskLimit - required else {
-        if activeCapacity { throw DownloadCacheError.capacityBusy }
-        throw SophonClientError.UnknownError(
-          "Download cache is full of active or partial downloads; increase its limit or resume them"
-        )
-      }
+      let removed = Set(victims)
+      ready.removeAll { removed.contains($0) }
       if !existing, createPartial {
         guard FileManager.default.createFile(atPath: paths.partial.path, contents: nil) else {
           throw SophonClientError.UnknownError("Cannot create \(paths.partial.path)")
@@ -288,18 +367,45 @@ actor DownloadCache {
         let handle = try FileHandle(forUpdating: paths.partial)
         defer { try? handle.close() }
         try handle.truncate(atOffset: size)
+        entries[partialName] = Entry(size: size, modified: Date())
+        occupied += size
       }
     }
   }
 
-  private func finish(context: DownloadContext, paths: DownloadPaths) async throws {
-    let budgetLock = try await acquireLock(directory.appendingPathComponent("budget.lock"))
-    defer { withExtendedLifetime(budgetLock) {} }
-    try await runTransferIO(checkCancellation: false) {
-      context.close()
+  func finish(_ paths: DownloadPaths) throws {
+    try refresh()
+    try mutate {
       try FileManager.default.moveItem(at: paths.partial, to: paths.ready)
-      // The ready payload is already verified; an old journal is no longer used.
       try? removeOwnedFile(paths.index)
+      let partial = entries.removeValue(forKey: paths.partial.lastPathComponent)!
+      let name = paths.ready.lastPathComponent
+      let modified = try transferFileMetadata(paths.ready.path).modified
+      entries[name] = Entry(size: partial.size, modified: modified)
+      var lower = 0
+      var upper = ready.count
+      while lower < upper {
+        let middle = (lower + upper) / 2
+        if entries[ready[middle]]!.modified < modified {
+          lower = middle + 1
+        } else {
+          upper = middle
+        }
+      }
+      ready.insert(name, at: lower)
+    }
+  }
+
+  func remove(_ paths: DownloadPaths) throws {
+    try refresh()
+    try mutate {
+      for path in [paths.ready, paths.partial, paths.index] {
+        try removeOwnedFile(path)
+        if let entry = entries.removeValue(forKey: path.lastPathComponent) {
+          occupied -= entry.size
+        }
+      }
+      ready.removeAll { $0 == paths.ready.lastPathComponent }
     }
   }
 }
@@ -415,7 +521,7 @@ private final class DownloadContext: @unchecked Sendable {
 
   func reset() throws {
     try lock.withLock {
-      try data.truncate(atOffset: 0)
+      // Keep the reservation visible to other processes; all prefixes restart at zero.
       try data.truncate(atOffset: size)
       try index.truncate(atOffset: 0)
       try index.seek(toOffset: 0)

@@ -209,7 +209,9 @@ private func transferTestCache(_ directory: URL, diskLimit: UInt64 = 16 * 1024 *
     maxRetries: 0, retryInterval: 0, configuration: configuration)
 }
 
-@Test(arguments: ["resume", "ignored-ranges", "invalid-range", "capacity", "tampered", "shrink"])
+@Test(arguments: [
+  "resume", "ignored-ranges", "invalid-range", "capacity", "tampered", "shrink", "shared-budget",
+])
 func testTransferDownloadRecovery(scenario: String) async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: root) }
@@ -246,6 +248,12 @@ func testTransferDownloadRecovery(scenario: String) async throws {
   }
   var downloaded: CachedDownload? = try await cache.get(request)
   #expect(try Data(contentsOf: #require(downloaded).fileURL) == bytes)
+  let payloadURL = try #require(downloaded).fileURL
+  let metadata = try transferFileMetadata(payloadURL.path)
+  let attributes = try FileManager.default.attributesOfItem(atPath: payloadURL.path)
+  let modified = try #require(attributes[.modificationDate] as? Date)
+  #expect(metadata.size == request.size)
+  #expect(abs(metadata.modified.timeIntervalSince(modified)) < 0.000001)
   if scenario == "resume" { #expect(fixture.ranges.contains("bytes=8192-\(bytes.count - 1)")) }
   if scenario == "ignored-ranges" { #expect(fixture.ranges.contains(nil)) }
   if scenario == "tampered" {
@@ -258,6 +266,35 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     #expect(try Data(contentsOf: verified.fileURL) == bytes)
     #expect(shared.fileURL == verified.fileURL)
     #expect(fixture.ranges.count == 2)
+  }
+  if scenario == "shared-budget" {
+    downloaded = nil
+    let firstCache = transferTestCache(root, diskLimit: request.size * 2)
+    do { _ = try await firstCache.get(request) }
+    let secondURL = url.appendingPathComponent("second")
+    let thirdURL = url.appendingPathComponent("third")
+    let secondBytes = Data(repeating: 0xB8, count: bytes.count)
+    let thirdBytes = Data(repeating: 0xC9, count: bytes.count)
+    TransferURLProtocol.register(TransferHTTPFixture(secondBytes), at: secondURL)
+    TransferURLProtocol.register(TransferHTTPFixture(thirdBytes), at: thirdURL)
+    defer {
+      TransferURLProtocol.remove(secondURL)
+      TransferURLProtocol.remove(thirdURL)
+    }
+    let secondRequest = DownloadRequest(
+      chunkID: "second", url: secondURL, md5: md5Hex(secondBytes), size: request.size)
+    let thirdRequest = DownloadRequest(
+      chunkID: "third", url: thirdURL, md5: md5Hex(thirdBytes), size: request.size)
+    let secondCache = transferTestCache(root, diskLimit: request.size * 2)
+    do { _ = try await secondCache.get(secondRequest) }
+    let third = try await firstCache.get(thirdRequest)
+    #expect(try Data(contentsOf: third.fileURL) == thirdBytes)
+    var used: UInt64 = 0
+    for name in try FileManager.default.contentsOfDirectory(atPath: root.path)
+    where name.hasSuffix(".bin") || name.hasSuffix(".partial") {
+      used += try transferFileMetadata(root.appendingPathComponent(name).path).size
+    }
+    #expect(used == request.size * 2)
   }
   if scenario == "shrink" {
     let nextURL = url.appendingPathComponent("second")
