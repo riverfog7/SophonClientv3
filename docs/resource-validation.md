@@ -2,6 +2,14 @@
 
 These measurements predate the shared RAM-first live working cache. References below to persistent download pools, snapshot-only RAM limits, and tmpfs cache-off runs describe the implementation measured at that time. Current cache behavior is documented in the project README.
 
+## Shared working-cache follow-up
+
+The release build passed the focused transfer suite: 10 tests covering 36 cases in the existing test file. Coverage includes RAM-only payloads, disk spills, both resumed backends, shared-budget admission, cleanup, native output validation, raw payloads, repair fallback, temporary/in-place recovery, checkpointed/stateless updates, and RPC transports. Swift formatting checks and TypeScript type checking passed.
+
+The release CLI also passed isolated local-HTTP checks using a 9,415-byte HDIFF patch, a 200,000-byte original, and a 209,225-byte target. Download-only operation left the game untouched, and later application reused its verified payload without another HTTP request. RAM-only application left no working payload files. A live disk-spill download was forcibly killed after saving 8,192 bytes; its next run requested only bytes 8,192–9,414, reported 1,223 new network bytes, verified the output, and removed the spill. The paused dashboard showed received and remaining bytes before the bundle was ready. Interrupted explicit predownload, repair fallback, plain output, and the interactive terminal dashboard also passed.
+
+Current release stdio and HTTP RPC checks accepted disk caching disabled with a zero disk limit. No new game installation, physical microSD measurement, or macOS run was performed in this follow-up. Existing game installations and the protected archive were untouched.
+
 Tested on Linux on 2026-10-07, using the debug SophonCLI through its stdio JSON-RPC transport. Checks and measurements used the actual game manifests and CDN payloads. No game launch or macOS hardware test is claimed.
 
 ## ZZZ installation and recovery
