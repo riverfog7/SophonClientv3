@@ -105,6 +105,19 @@ func testTransferCacheBudgets(memoryLimit: UInt64) async throws {
   }
   let released = await cache.usage
   #expect(released.memory == 0 && released.disk == 0 && released.entries == 0)
+
+  // A downloaded body leaves room for its consumer, including while that input is active.
+  let shared = try BinaryCache(
+    directory: root.appendingPathComponent("shared"), memoryLimit: 16, diskLimit: 0, entryLimit: 3)
+  let download = try await shared.makeWriter(
+    expectedSize: 4, purpose: .download(memoryHeadroom: 8, diskHeadroom: 0))
+  let input = try await shared.makeWriter(expectedSize: 8)
+  let next = try await shared.makeWriter(
+    expectedSize: 4, purpose: .download(memoryHeadroom: 8, diskHeadroom: 0))
+  #expect(await shared.usage.memory == 16)
+  try await download.abort()
+  try await input.abort()
+  try await next.abort()
 }
 
 private final class TransferHTTPFixture: @unchecked Sendable {
@@ -393,6 +406,80 @@ private func transferTestPlan(
     deleteFiles: [PlannedDeleteFile(fileURL: root.appendingPathComponent("obsolete"), size: 4)])
 }
 
+@Test(arguments: ["ram", "spill", "resume-ram", "resume-spill", "no-spill", "bad-prefetch"])
+func testTransferWorkingCache(scenario: String) async throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let bytes = Data(repeating: 0xB7, count: 256 * 1024)
+  let url = URL(string: "https://transfer.invalid/\(root.lastPathComponent)")!
+  let fixture = TransferHTTPFixture(bytes)
+  TransferURLProtocol.register(fixture, at: url)
+  defer { TransferURLProtocol.remove(url) }
+  let request = DownloadRequest(
+    chunkID: "body", url: url, md5: md5Hex(bytes), size: UInt64(bytes.count))
+  var settings = TransferSettings()
+  settings.cacheDirectory = root.appendingPathComponent("cache").path
+  settings.memoryLimit = scenario == "spill" || scenario == "resume-spill" ? 0 : request.size * 2
+  settings.diskLimit = request.size
+  settings.diskCacheEnabled = scenario != "no-spill"
+  let working = settings.cacheURL.appendingPathComponent("working/\(transferKey(root.path))/update")
+  let downloads = working.appendingPathComponent("downloads")
+  let key = transferKey("\(request.md5):\(request.size)")
+  if scenario.hasPrefix("resume") {
+    try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+    try Data(bytes.prefix(8192)).write(to: downloads.appendingPathComponent(key + ".partial"))
+    try Data("{\"range\":0,\"bytes\":8192}\n".utf8)
+      .write(to: downloads.appendingPathComponent(key + ".jsonl"))
+  }
+  let prefetch =
+    scenario == "bad-prefetch" ? transferTestCache(root.appendingPathComponent("prefetch")) : nil
+  if let prefetch {
+    let cached = try await prefetch.get(request)
+    try Data(repeating: 0, count: bytes.count).write(to: cached.fileURL)
+  }
+  let transport = transferTestCache(downloads, cachedSource: prefetch)
+  let workspace = try await TransferWorkspace(
+    settings: settings, gameDirectory: root, operation: "update", transport: transport)
+  do {
+    let binary = try await workspace.download(request)
+    #expect(try binary.data() == bytes)
+    #expect(binary.inMemory == (settings.memoryLimit > 0))
+    let progress = workspace.telemetry.snapshot()
+    #expect(progress.memoryBytes <= settings.memoryLimit)
+    #expect(progress.devices.reduce(UInt64(0)) { $0 + $1.reservedCacheBytes } <= settings.diskLimit)
+    #expect(progress.receivedBytes == request.size)
+    #expect(progress.retainedBytes == (scenario.hasPrefix("resume") ? 8192 : 0))
+    #expect(progress.transferredBytes == request.size - progress.retainedBytes)
+    #expect(progress.devices.count == 1)
+    #expect(progress.devices.first?.roles.contains("Target") == true)
+    #expect(progress.devices.first?.roles.contains("Cache") == true)
+    if scenario.hasPrefix("resume") {
+      #expect(fixture.ranges.contains("bytes=8192-\(bytes.count - 1)"))
+    }
+    if scenario == "ram" || scenario == "no-spill" {
+      #expect(!FileManager.default.fileExists(atPath: working.path))
+      #expect(progress.devices.allSatisfy { $0.writtenBytes == 0 && $0.cacheBytes == 0 })
+    }
+    try await workspace.consumed(binary, request: request)
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: downloads.appendingPathComponent(key + ".partial").path))
+    #expect(
+      !FileManager.default.fileExists(atPath: downloads.appendingPathComponent(key + ".jsonl").path)
+    )
+  }
+  try await workspace.finish(completed: true)
+  #expect(!FileManager.default.fileExists(atPath: working.path))
+  let final = workspace.telemetry.snapshot()
+  #expect(final.memoryBytes == 0)
+  #expect(final.devices.allSatisfy { $0.cacheBytes == 0 && $0.reservedCacheBytes == 0 })
+  if scenario == "no-spill" {
+    await #expect(throws: BinaryCacheError.self) {
+      _ = try await workspace.cache.makeWriter(expectedSize: settings.memoryLimit + 1)
+    }
+  }
+}
+
 @Test(arguments: [UpdateWriteMode.temporaryReplacement, .inPlace], [false, true])
 func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bool) async throws {
   let hdiff = try loadHDiffFixture()
@@ -403,6 +490,7 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   defer { try? FileManager.default.removeItem(at: root) }
   var settings = try JSONDecoder().decode(TransferSettings.self, from: Data("{}".utf8))
   #expect(settings.ioPolicy == nil)
+  #expect(settings.memoryLimit == 1024 * 1024 * 1024)
   settings.cacheDirectory = root.appendingPathComponent("cache").path
   settings.memoryLimit = 0
   settings.writeMode = writeMode
@@ -500,7 +588,82 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   #expect(bundleFixture.ranges.count == 1)
 }
 
-@Test(arguments: ["in-place", "old-renamed", "new-ready", "committed", "checkpointed"])
+@Test(arguments: ["ram", "spill", "mixed", "all-current"])
+func testTransferLiveUpdate(scenario: String) async throws {
+  let fixture = try loadHDiffFixture()
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  var settings = TransferSettings()
+  settings.cacheDirectory = root.appendingPathComponent("cache").path
+  settings.memoryLimit = scenario == "spill" ? 0 : 1024 * 1024
+  settings.diskLimit = 1024 * 1024
+  settings.diskCacheEnabled = scenario == "spill"
+  settings.preserveState = false
+  var plan = try transferTestPlan(root: root, fixture: fixture)
+  var bundleBytes = fixture.patch
+  let first = try #require(plan.installFiles.first)
+  try (scenario == "mixed" || scenario == "all-current" ? fixture.new : fixture.old)
+    .write(to: first.fileURL)
+  if scenario == "mixed" {
+    let secondURL = root.appendingPathComponent("second.bin")
+    try fixture.old.write(to: secondURL)
+    let second = PlannedUpdateFile(
+      fileURL: secondURL, size: first.size, md5: first.md5, installChunks: [])
+    let bundle = try #require(plan.patchBundles.first)
+    let patch = PlannedPatch(
+      patchOffset: UInt64(fixture.patch.count), patchLength: UInt64(fixture.patch.count),
+      original: PlannedPatchSource(
+        fileURL: secondURL, size: UInt64(fixture.old.count), md5: md5Hex(fixture.old)),
+      target: second)
+    bundleBytes += fixture.patch
+    plan = UpdatePlan(
+      sourceVersion: plan.sourceVersion, targetVersion: plan.targetVersion,
+      patchBundles: [
+        PlannedPatchBundle(
+          patchID: bundle.patchID, patchSize: UInt64(bundleBytes.count),
+          patchHash: md5Hex(bundleBytes), downloadInfo: bundle.downloadInfo,
+          patches: bundle.patches + [patch])
+      ],
+      installFiles: [first, second], deleteFiles: plan.deleteFiles)
+  }
+  let bundle = try #require(plan.patchBundles.first)
+  let url = try bundle.downloadRequest().url
+  let network = TransferHTTPFixture(bundleBytes)
+  TransferURLProtocol.register(network, at: url)
+  defer { TransferURLProtocol.remove(url) }
+  let cache = transferTestCache(settings.cacheURL.appendingPathComponent("downloads"))
+  let updater = try Updater(baseGameDir: root, maxCocurrentDownloads: 2, maxCocurrentWrites: 2)
+  let installer = try Installer(
+    baseGameDir: root, maxCocurrentChecks: 1, maxCocurrentDownloads: 2,
+    maxCocurrentPostProcessors: 2, maxCocurrentWrites: 2, downloadCache: cache)
+  let reporter = UpdateReporter(logger: .init(label: "test"))
+  try await updater.execute(
+    plan, settings: settings, downloadCache: cache, installer: installer, reporter: reporter)
+  let progress = await reporter.snapshot()
+  #expect(progress.completedFiles == plan.installFiles.count)
+  #expect(progress.repairFiles == 0)
+  #expect(progress.skippedFiles == (scenario == "mixed" || scenario == "all-current" ? 1 : 0))
+  #expect(network.ranges.count == (scenario == "all-current" ? 0 : 1))
+  #expect(progress.totalPatchBytes == (scenario == "all-current" ? 0 : UInt64(bundleBytes.count)))
+  #expect(progress.remainingPatchBytes == 0)
+  #expect(progress.resources?.memoryBytes == 0)
+  #expect(
+    progress.resources?.devices.allSatisfy { $0.cacheBytes == 0 && $0.reservedCacheBytes == 0 }
+      == true)
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: settings.cacheURL.appendingPathComponent("working/\(transferKey(root.path))/update")
+        .path))
+  for target in plan.installFiles { #expect(try Data(contentsOf: target.fileURL) == fixture.new) }
+  if scenario == "ram" {
+    let device = try #require(progress.resources?.devices.first)
+    #expect(device.readBytes == UInt64(fixture.old.count))
+    #expect(device.writtenBytes == UInt64(fixture.new.count))
+  }
+}
+
+@Test(arguments: ["in-place", "old-renamed", "new-ready", "committed", "checkpointed", "stateless"])
 func testTransferInterruptedUpdate(scenario: String) async throws {
   let fixture = try loadHDiffFixture()
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -509,6 +672,7 @@ func testTransferInterruptedUpdate(scenario: String) async throws {
   var settings = TransferSettings()
   settings.cacheDirectory = root.appendingPathComponent("cache").path
   settings.writeMode = scenario == "in-place" ? .inPlace : .temporaryReplacement
+  settings.preserveState = scenario != "stateless"
   let plan = try transferTestPlan(root: root, fixture: fixture)
   let patch = try #require(plan.patchBundles.first?.patches.first)
   let source = try #require(patch.original)
@@ -531,7 +695,7 @@ func testTransferInterruptedUpdate(scenario: String) async throws {
   defer { TransferURLProtocol.remove(bundleURL) }
   let cache = transferTestCache(settings.cacheURL.appendingPathComponent("downloads"))
   if scenario == "in-place" {
-    let original = settings.cacheURL.appendingPathComponent("originals/\(transferKey(root.path))")
+    let original = stateDirectory.appendingPathComponent("originals")
       .appendingPathComponent(
         transferKey("\(source.fileURL.path):\(source.size):\(source.md5)") + ".original")
     try FileManager.default.createDirectory(
