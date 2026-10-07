@@ -16,10 +16,19 @@ struct RPCCLI: AsyncParsableCommand {
     .stdio
   @Option(help: "HTTP port; zero selects an available port.") var port = 0
   @Option(help: "Optional bearer token required by the HTTP transport.") var token: String?
+  @Option(help: "Browser origin permitted by HTTP CORS; repeat for additional origins.")
+  var allowOrigin: [String] = []
 
   mutating func validate() throws {
     guard (0...65535).contains(port) else {
       throw ValidationError("Port must be between 0 and 65535")
+    }
+    guard
+      allowOrigin.allSatisfy({
+        !$0.isEmpty && !$0.contains("*") && !$0.contains("\r") && !$0.contains("\n")
+      })
+    else {
+      throw ValidationError("--allow-origin requires an exact browser origin")
     }
   }
 
@@ -68,7 +77,8 @@ struct RPCCLI: AsyncParsableCommand {
       await dispatcher.shutdown()
       withExtendedLifetime(interrupts) {}
     } else {
-      try await serveHTTP(port: port, token: token, writer: writer)
+      try await serveHTTP(
+        port: port, token: token, allowedOrigins: Set(allowOrigin), writer: writer)
     }
   }
 }
@@ -178,7 +188,9 @@ private final class RPCInput: @unchecked Sendable {
   }
 }
 
-private func serveHTTP(port: Int, token: String?, writer: RPCOutput) async throws {
+private func serveHTTP(
+  port: Int, token: String?, allowedOrigins: Set<String>, writer: RPCOutput
+) async throws {
   let dispatcher = RPCDispatcher()
   let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
   let shutdown = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -188,7 +200,7 @@ private func serveHTTP(port: Int, token: String?, writer: RPCOutput) async throw
       .childChannelInitializer { channel in
         channel.pipeline.configureHTTPServerPipeline().flatMap {
           channel.pipeline.addHandler(
-            HTTPRPCHandler(dispatcher: dispatcher, token: token) {
+            HTTPRPCHandler(dispatcher: dispatcher, token: token, allowedOrigins: allowedOrigins) {
               shutdown.continuation.yield(())
             })
         }
@@ -237,14 +249,20 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
   typealias OutboundOut = HTTPServerResponsePart
   private let dispatcher: RPCDispatcher
   private let token: String?
+  private let allowedOrigins: Set<String>
   private let onShutdown: @Sendable () -> Void
   private var head: HTTPRequestHead?
   private var body = Data()
   private var rejected = false
+  private var responseOrigin: String?
 
-  init(dispatcher: RPCDispatcher, token: String?, onShutdown: @escaping @Sendable () -> Void) {
+  init(
+    dispatcher: RPCDispatcher, token: String?, allowedOrigins: Set<String>,
+    onShutdown: @escaping @Sendable () -> Void
+  ) {
     self.dispatcher = dispatcher
     self.token = token
+    self.allowedOrigins = allowedOrigins
     self.onShutdown = onShutdown
   }
 
@@ -254,17 +272,37 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
       self.head = head
       body = Data()
       rejected = false
-      if head.method != .POST || !["/rpc", "/"].contains(head.uri) {
+      responseOrigin = nil
+      let origin = head.headers.first(name: "Origin")
+      if !["/rpc", "/"].contains(head.uri) {
+        rejected = true
+        reply(context, status: .notFound)
+      } else if let origin, !allowedOrigins.contains(origin) {
+        rejected = true
+        reply(context, status: .forbidden)
+      } else if head.method == .OPTIONS {
+        rejected = true
+        responseOrigin = origin
+        let requestedMethod = head.headers.first(name: "Access-Control-Request-Method")
+        reply(
+          context,
+          status: origin != nil && requestedMethod?.uppercased() == "POST"
+            ? .noContent : .badRequest)
+      } else if head.method != .POST {
         rejected = true
         reply(context, status: .notFound)
       } else if let token, head.headers.first(name: "Authorization") != "Bearer \(token)" {
         rejected = true
+        responseOrigin = origin
         reply(context, status: .unauthorized)
       } else if head.headers.first(name: "Content-Type")?.lowercased().split(separator: ";").first
         != "application/json"
       {
         rejected = true
+        responseOrigin = origin
         reply(context, status: .unsupportedMediaType)
+      } else {
+        responseOrigin = origin
       }
     case .body(let buffer):
       guard !rejected else { return }
@@ -302,6 +340,12 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
     headers.add(name: "Content-Type", value: "application/json")
     headers.add(name: "Content-Length", value: String(body.count))
     headers.add(name: "Connection", value: "close")
+    if let responseOrigin {
+      headers.add(name: "Access-Control-Allow-Origin", value: responseOrigin)
+      headers.add(name: "Access-Control-Allow-Methods", value: "POST, OPTIONS")
+      headers.add(name: "Access-Control-Allow-Headers", value: "Content-Type, Authorization")
+      headers.add(name: "Vary", value: "Origin")
+    }
     context.write(
       wrapOutboundOut(.head(HTTPResponseHead(version: .http1_1, status: status, headers: headers))),
       promise: nil)
