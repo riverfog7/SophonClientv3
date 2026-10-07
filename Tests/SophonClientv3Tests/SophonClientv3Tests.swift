@@ -126,6 +126,7 @@ private final class TransferHTTPFixture: @unchecked Sendable {
     let headers: [String: String]
     let status: Int
     let fail: Bool
+    let holdResponse: Bool
   }
 
   let data: Data
@@ -133,18 +134,21 @@ private final class TransferHTTPFixture: @unchecked Sendable {
   private var failurePrefix: Int?
   private let ignoreRanges: Bool
   private let invalidRange: Bool
+  private let holdResponse: Bool
   private let observe: @Sendable () -> Bool
   private var requests: [String?] = []
   private var observations: [Bool] = []
 
   init(
     _ data: Data, failurePrefix: Int? = nil, ignoreRanges: Bool = false,
-    invalidRange: Bool = false, observe: @escaping @Sendable () -> Bool = { true }
+    invalidRange: Bool = false, holdResponse: Bool = false,
+    observe: @escaping @Sendable () -> Bool = { true }
   ) {
     self.data = data
     self.failurePrefix = failurePrefix
     self.ignoreRanges = ignoreRanges
     self.invalidRange = invalidRange
+    self.holdResponse = holdResponse
     self.observe = observe
   }
 
@@ -171,9 +175,12 @@ private final class TransferHTTPFixture: @unchecked Sendable {
       if let prefix = failurePrefix {
         failurePrefix = nil
         return Reply(
-          data: Data(bytes.prefix(prefix)), headers: headers, status: full ? 200 : 206, fail: true)
+          data: Data(bytes.prefix(prefix)), headers: headers, status: full ? 200 : 206, fail: true,
+          holdResponse: false)
       }
-      return Reply(data: bytes, headers: headers, status: full ? 200 : 206, fail: false)
+      return Reply(
+        data: holdResponse ? Data(bytes.prefix(8192)) : bytes, headers: headers,
+        status: full ? 200 : 206, fail: false, holdResponse: holdResponse)
     }
   }
 }
@@ -209,6 +216,7 @@ private final class TransferURLProtocol: URLProtocol {
       url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
     client?.urlProtocol(self, didLoad: reply.data)
+    if reply.holdResponse { return }
     if reply.fail {
       client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
     } else {
@@ -230,10 +238,12 @@ private func transferTestCache(
     maxRetries: 0, retryInterval: 0, cachedSource: cachedSource, configuration: configuration)
 }
 
-@Test(arguments: [
-  "resume", "ignored-ranges", "invalid-range", "capacity", "tampered", "shrink", "shared-budget",
-  "prefetched",
-])
+@Test(
+  .timeLimit(.minutes(1)),
+  arguments: [
+    "resume", "ignored-ranges", "invalid-range", "capacity", "tampered", "shrink", "shared-budget",
+    "prefetched", "cancelled",
+  ])
 func testTransferDownloadRecovery(scenario: String) async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: root) }
@@ -242,7 +252,8 @@ func testTransferDownloadRecovery(scenario: String) async throws {
   let url = URL(string: "https://transfer.invalid/\(UUID().uuidString)")!
   let fixture = TransferHTTPFixture(
     bytes,
-    ignoreRanges: scenario == "ignored-ranges", invalidRange: scenario == "invalid-range")
+    ignoreRanges: scenario == "ignored-ranges", invalidRange: scenario == "invalid-range",
+    holdResponse: scenario == "cancelled")
   TransferURLProtocol.register(fixture, at: url)
   defer { TransferURLProtocol.remove(url) }
   let request = DownloadRequest(
@@ -269,6 +280,18 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     diskLimit: scenario == "prefetched"
       ? 1 : scenario == "capacity" ? request.size : 16 * 1024 * 1024,
     cachedSource: source)
+  if scenario == "cancelled" {
+    let telemetry = TransferTelemetry(memoryLimit: 0, diskLimit: request.size)
+    let waiting = Task { try await cache.get(request, telemetry: telemetry) }
+    for _ in 0..<100 {
+      if telemetry.snapshot().receivedBytes > 0 { break }
+      try await Task.sleep(for: .milliseconds(1))
+    }
+    #expect(!fixture.ranges.isEmpty)
+    waiting.cancel()
+    await #expect(throws: CancellationError.self) { _ = try await waiting.value }
+    return
+  }
   if scenario == "invalid-range" {
     await #expect(throws: (any Error).self) { _ = try await cache.get(request) }
     #expect(
@@ -413,7 +436,9 @@ private func transferTestPlan(
     deleteFiles: [PlannedDeleteFile(fileURL: root.appendingPathComponent("obsolete"), size: 4)])
 }
 
-@Test(arguments: ["ram", "spill", "resume-ram", "resume-spill", "no-spill", "bad-prefetch"])
+@Test(
+  .timeLimit(.minutes(1)),
+  arguments: ["ram", "spill", "resume-ram", "resume-spill", "no-spill", "bad-prefetch"])
 func testTransferWorkingCache(scenario: String) async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   defer { try? FileManager.default.removeItem(at: root) }

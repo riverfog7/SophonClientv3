@@ -863,10 +863,10 @@ private final class RangeTransfer: @unchecked Sendable {
           self.task = task
           return self.cancelled
         }
-        if cancelled { task.cancel() } else { task.resume() }
+        if cancelled { cancel(session) } else { task.resume() }
       }
     } onCancel: {
-      cancel()
+      cancel(session)
     }
   }
 
@@ -898,15 +898,18 @@ private final class RangeTransfer: @unchecked Sendable {
     }
   }
 
-  func receive(_ data: Data) {
-    guard lock.withLock({ failure == nil && !cancelled }) else { return }
-    do {
-      guard UInt64(data.count) <= length - received else { throw BinaryCacheError.outOfBounds }
-      try context.write(data, at: position + received, allowExisting: whole)
-      received += UInt64(data.count)
-    } catch {
-      lock.withLock { failure = error }
-      lock.withLock { task }?.cancel()
+  func receive(_ data: Data) -> Bool {
+    lock.withLock {
+      guard continuation != nil, failure == nil, !cancelled else { return true }
+      do {
+        guard UInt64(data.count) <= length - received else { throw BinaryCacheError.outOfBounds }
+        try context.write(data, at: position + received, allowExisting: whole)
+        received += UInt64(data.count)
+        return true
+      } catch {
+        failure = error
+        return false
+      }
     }
   }
 
@@ -915,27 +918,29 @@ private final class RangeTransfer: @unchecked Sendable {
       let continuation = continuation
       self.continuation = nil
       task = nil
-      return (continuation, failure, cancelled)
+      return (continuation, failure, cancelled, received)
     }
     guard let continuation = state.0 else { return }
     if state.2 {
       continuation.resume(throwing: CancellationError())
     } else if let error = state.1 ?? error {
       continuation.resume(throwing: error)
-    } else if received != length {
+    } else if state.3 != length {
       continuation.resume(
-        throwing: SophonClientError.SizeMismatch(expected: length, actual: received))
+        throwing: SophonClientError.SizeMismatch(expected: length, actual: state.3))
     } else {
       continuation.resume()
     }
   }
 
-  private func cancel() {
+  private func cancel(_ session: RangeDownloadSession) {
     let task = lock.withLock {
       cancelled = true
       return self.task
     }
     task?.cancel()
+    if let task { session.forget(task.taskIdentifier) }
+    complete(nil)
   }
 }
 
@@ -960,16 +965,29 @@ private final class RangeDownloadSession: NSObject, URLSessionDataDelegate, @unc
 
   func invalidate() { session.invalidateAndCancel() }
 
+  func forget(_ id: Int) { _ = lock.withLock { transfers.removeValue(forKey: id) } }
+
   func urlSession(
     _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
   ) {
     let transfer = lock.withLock { transfers[dataTask.taskIdentifier] }
-    completionHandler(transfer?.accept(response) == true ? .allow : .cancel)
+    if transfer?.accept(response) == true {
+      completionHandler(.allow)
+    } else {
+      completionHandler(.cancel)
+      forget(dataTask.taskIdentifier)
+      transfer?.complete(nil)
+    }
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-    lock.withLock { transfers[dataTask.taskIdentifier] }?.receive(data)
+    let transfer = lock.withLock { transfers[dataTask.taskIdentifier] }
+    if transfer?.receive(data) == false {
+      dataTask.cancel()
+      forget(dataTask.taskIdentifier)
+      transfer?.complete(nil)
+    }
   }
 
   func urlSession(
