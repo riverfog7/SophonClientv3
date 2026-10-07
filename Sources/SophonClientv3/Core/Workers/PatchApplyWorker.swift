@@ -89,10 +89,19 @@ final class PatchApplyWorker: Sendable {
       var offset: UInt64 = 0
       while offset < patchSize {
         let count = Int(min(1024 * 1024, patchSize - offset))
-        var data = Data(count: count)
-        try data.withUnsafeMutableBytes { try patch.read(at: offset, into: $0) }
-        try data.withUnsafeBytes { try output.write(at: offset, $0) }
-        offset += UInt64(data.count)
+        #if canImport(ObjectiveC)
+          try autoreleasepool {
+            var data = Data(count: count)
+            try data.withUnsafeMutableBytes { try patch.read(at: offset, into: $0) }
+            try data.withUnsafeBytes { try output.write(at: offset, $0) }
+            offset += UInt64(data.count)
+          }
+        #else
+          var data = Data(count: count)
+          try data.withUnsafeMutableBytes { try patch.read(at: offset, into: $0) }
+          try data.withUnsafeBytes { try output.write(at: offset, $0) }
+          offset += UInt64(data.count)
+        #endif
       }
     }
 
@@ -131,12 +140,23 @@ private final class FilePatchSource: HPatchSource, @unchecked Sendable {
       try handle.seek(toOffset: offset + position)
       var count = 0
       while count < buffer.count {
-        guard let data = try handle.read(upToCount: min(1024 * 1024, buffer.count - count)),
-          !data.isEmpty
-        else { throw BinaryCacheError.unexpectedEndOfFile }
-        data.copyBytes(
-          to: UnsafeMutableRawBufferPointer(rebasing: buffer[count..<(count + data.count)]))
-        count += data.count
+        #if canImport(ObjectiveC)
+          try autoreleasepool {
+            guard let data = try handle.read(upToCount: min(1024 * 1024, buffer.count - count)),
+              !data.isEmpty
+            else { throw BinaryCacheError.unexpectedEndOfFile }
+            data.copyBytes(
+              to: UnsafeMutableRawBufferPointer(rebasing: buffer[count..<(count + data.count)]))
+            count += data.count
+          }
+        #else
+          guard let data = try handle.read(upToCount: min(1024 * 1024, buffer.count - count)),
+            !data.isEmpty
+          else { throw BinaryCacheError.unexpectedEndOfFile }
+          data.copyBytes(
+            to: UnsafeMutableRawBufferPointer(rebasing: buffer[count..<(count + data.count)]))
+          count += data.count
+        #endif
       }
     }
   }
@@ -152,8 +172,15 @@ private struct CachedPatchSource: HPatchSource {
   }
 
   func read(at offset: UInt64, into buffer: UnsafeMutableRawBufferPointer) throws {
-    let data = try reader.read(at: offset, count: buffer.count)
-    data.copyBytes(to: buffer)
+    #if canImport(ObjectiveC)
+      try autoreleasepool {
+        let data = try reader.read(at: offset, count: buffer.count)
+        data.copyBytes(to: buffer)
+      }
+    #else
+      let data = try reader.read(at: offset, count: buffer.count)
+      data.copyBytes(to: buffer)
+    #endif
   }
 }
 
@@ -209,7 +236,11 @@ private final class HashedPatchOutput: HPatchSink, @unchecked Sendable {
       guard UInt64(bytes.count) <= expectedSize - written else {
         throw SophonClientError.UnknownError("Patch output exceeds the target size")
       }
-      try handle.write(contentsOf: Data(bytes))
+      #if canImport(ObjectiveC)
+        try autoreleasepool { try handle.write(contentsOf: Data(bytes)) }
+      #else
+        try handle.write(contentsOf: Data(bytes))
+      #endif
       telemetry?.write(UInt64(bytes.count), device: device)
       hasher.update(bufferPointer: bytes)
       written += UInt64(bytes.count)

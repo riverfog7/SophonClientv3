@@ -40,7 +40,11 @@ private func performCacheIO<T: Sendable>(
   try Task.checkCancellation()
   let value: T = try await withCheckedThrowingContinuation { continuation in
     queue.async {
-      continuation.resume(with: Result(catching: operation))
+      #if canImport(ObjectiveC)
+        continuation.resume(with: Result { try autoreleasepool(invoking: operation) })
+      #else
+        continuation.resume(with: Result(catching: operation))
+      #endif
     }
   }
   try Task.checkCancellation()
@@ -292,9 +296,17 @@ struct CachedBinary: Sendable {
     var hasher = Insecure.MD5()
     var position: UInt64 = 0
     while position < size {
-      let data = try reader.read(at: position, count: Int(min(1024 * 1024, size - position)))
-      hasher.update(data: data)
-      position += UInt64(data.count)
+      #if canImport(ObjectiveC)
+        try autoreleasepool {
+          let data = try reader.read(at: position, count: Int(min(1024 * 1024, size - position)))
+          hasher.update(data: data)
+          position += UInt64(data.count)
+        }
+      #else
+        let data = try reader.read(at: position, count: Int(min(1024 * 1024, size - position)))
+        hasher.update(data: data)
+        position += UInt64(data.count)
+      #endif
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }

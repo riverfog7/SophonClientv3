@@ -10,7 +10,13 @@ func runTransferIO<T: Sendable>(
 ) async throws -> T {
   if checkCancellation { try Task.checkCancellation() }
   return try await withCheckedThrowingContinuation { continuation in
-    transferIOQueue.async { continuation.resume(with: Result(catching: operation)) }
+    transferIOQueue.async {
+      #if canImport(ObjectiveC)
+        continuation.resume(with: Result { try autoreleasepool(invoking: operation) })
+      #else
+        continuation.resume(with: Result(catching: operation))
+      #endif
+    }
   }
 }
 
@@ -74,11 +80,26 @@ func digestFile(
   var hasher = Insecure.MD5()
   var size: UInt64 = 0
   let activeDevice = device ?? telemetry?.register(fileURL, role: "Target") ?? ""
-  while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
-    hasher.update(data: data)
-    size += UInt64(data.count)
-    telemetry?.read(UInt64(data.count), device: activeDevice)
-  }
+  #if canImport(ObjectiveC)
+    var reachedEnd = false
+    while !reachedEnd {
+      try autoreleasepool {
+        guard let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty else {
+          reachedEnd = true
+          return
+        }
+        hasher.update(data: data)
+        size += UInt64(data.count)
+        telemetry?.read(UInt64(data.count), device: activeDevice)
+      }
+    }
+  #else
+    while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+      hasher.update(data: data)
+      size += UInt64(data.count)
+      telemetry?.read(UInt64(data.count), device: activeDevice)
+    }
+  #endif
   return FileDigest(
     size: size, md5: hasher.finalize().map { String(format: "%02x", $0) }.joined())
 }

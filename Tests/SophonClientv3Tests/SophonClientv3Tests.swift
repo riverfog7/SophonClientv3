@@ -552,8 +552,9 @@ func testTransferWorkingCache(scenario: String) async throws {
 @Test(arguments: [UpdateWriteMode.temporaryReplacement, .inPlace], [false, true])
 func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bool) async throws {
   let hdiff = try loadHDiffFixture()
+  let new = rawPayload ? Data(repeating: 0x5A, count: 2 * 1024 * 1024 + 17) : hdiff.new
   let fixture = HDiffFixture(
-    old: hdiff.old, new: hdiff.new, patch: rawPayload ? hdiff.new : hdiff.patch)
+    old: hdiff.old, new: new, patch: rawPayload ? new : hdiff.patch)
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
