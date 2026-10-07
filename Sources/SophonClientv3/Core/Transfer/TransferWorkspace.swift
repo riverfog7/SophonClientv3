@@ -11,7 +11,7 @@ final class TransferWorkspace: Sendable {
 
   init(
     settings: TransferSettings, gameDirectory: URL, operation: String,
-    transport: DownloadCache, io: WorkLimiter? = nil
+    transport: DownloadCache, io: WorkLimiter? = nil, recoveryDirectory: URL? = nil
   ) async throws {
     self.settings = settings
     self.transport = transport
@@ -32,6 +32,32 @@ final class TransferWorkspace: Sendable {
       memoryLimit: settings.memoryLimit,
       diskLimit: settings.diskCacheEnabled ? settings.diskLimit : 0,
       entryLimit: settings.entryLimit, telemetry: telemetry)
+    let retained = try await runTransferIO { [directory] in
+      try removeOwnedFile(directory.appendingPathComponent("inputs"))
+      let downloads = directory.appendingPathComponent("downloads", isDirectory: true)
+      if !settings.diskCacheEnabled { try removeOwnedFile(downloads) }
+      var files: [URL: UInt64] = [:]
+      for folder in [downloads, recoveryDirectory].compactMap({ $0 }) {
+        guard FileManager.default.fileExists(atPath: folder.path) else { continue }
+        for file in try FileManager.default.contentsOfDirectory(
+          at: folder, includingPropertiesForKeys: [.fileSizeKey])
+        where file.pathExtension == "partial" || file.pathExtension == "original" {
+          files[file] = try transferFileMetadata(file).size
+        }
+      }
+      var total = files.values.reduce(UInt64(0), +)
+      let limit = settings.diskCacheEnabled ? settings.diskLimit : 0
+      // Lowering a limit may discard download prefixes, but never an in-place recovery original.
+      for file in files.keys.filter({ $0.pathExtension == "partial" }).sorted(by: {
+        files[$0]! > files[$1]!
+      }) where total > limit {
+        try removeOwnedFile(file)
+        try removeOwnedFile(file.deletingPathExtension().appendingPathExtension("jsonl"))
+        total -= files.removeValue(forKey: file)!
+      }
+      return files
+    }
+    try await cache.restoreDiskFiles(retained)
   }
 
   func download(
@@ -56,6 +82,8 @@ final class TransferWorkspace: Sendable {
       try removeOwnedFile(self.directory.appendingPathComponent("downloads/\(key).partial"))
       try removeOwnedFile(self.directory.appendingPathComponent("downloads/\(key).jsonl"))
     }
+    let key = transferKey("\(request.md5.lowercased()):\(request.size)")
+    await cache.removedRetainedFile(directory.appendingPathComponent("downloads/\(key).partial"))
   }
 
   func finish(completed: Bool) async throws {
@@ -64,6 +92,7 @@ final class TransferWorkspace: Sendable {
       try await runTransferIO(checkCancellation: false) { [directory] in
         try removeOwnedFile(directory)
       }
+      await cache.clearRetainedFiles()
     }
   }
 }

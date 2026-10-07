@@ -104,7 +104,10 @@ actor OriginalSnapshots {
         return OriginalSnapshot(
           input: .cached(try await writer.finish()), observed: digest, fromSavedOriginal: true)
       }
-      if durable { try await runTransferIO { try removeOwnedFile(savedURL) } }
+      if durable {
+        try await runTransferIO { try removeOwnedFile(savedURL) }
+        await cache.removedRetainedFile(savedURL)
+      }
       let writer =
         cacheOnly
         ? nil
@@ -190,6 +193,7 @@ actor OriginalSnapshots {
     if !cacheOnly, diskSizes[key] != nil {
       let fileURL = directory.appendingPathComponent(key + ".original")
       try await runTransferIO(checkCancellation: false) { try removeOwnedFile(fileURL) }
+      await cache.removedRetainedFile(fileURL)
       diskSizes.removeValue(forKey: key)
     }
   }
@@ -198,6 +202,10 @@ actor OriginalSnapshots {
 
   func requiresDisk(_ source: PlannedPatchSource) -> Bool {
     durableSources.contains(source.fileURL) || diskSizes[Self.key(source)] != nil
+  }
+
+  func additionalDiskBytes(_ source: PlannedPatchSource) -> UInt64 {
+    source.size - min(source.size, diskSizes[Self.key(source)] ?? 0)
   }
 
   func close() async {

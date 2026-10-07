@@ -47,10 +47,11 @@ actor BinaryCache {
     let id: UUID
     let device: String
     let telemetry: TransferTelemetry?
+    let storedBytes: UInt64
 
     fileprivate init(
       cache: BinaryCache, id: UUID, size: UInt64, inMemory: Bool, device: String,
-      telemetry: TransferTelemetry?
+      telemetry: TransferTelemetry?, storedBytes: UInt64
     ) {
       self.cache = cache
       self.id = id
@@ -58,6 +59,7 @@ actor BinaryCache {
       self.inMemory = inMemory
       self.device = device
       self.telemetry = telemetry
+      self.storedBytes = storedBytes
     }
 
     deinit {
@@ -78,6 +80,7 @@ actor BinaryCache {
     let purpose: Purpose
     let forceDisk: Bool
     let device: String
+    let fileURL: URL?
     let continuation: CheckedContinuation<Reservation, any Error>
   }
 
@@ -88,6 +91,7 @@ actor BinaryCache {
   private let telemetry: TransferTelemetry?
   private let device: String
   private var headrooms: [UUID: (memory: UInt64, disk: UInt64)] = [:]
+  private var retainedFiles: [URL: (size: UInt64, device: String)] = [:]
   private var memoryBytes: UInt64 = 0
   private var diskBytes: UInt64 = 0
   private var inputMemoryBytes: UInt64 = 0
@@ -144,7 +148,7 @@ actor BinaryCache {
         waiters.append(
           Waiter(
             id: id, size: expectedSize, purpose: purpose, forceDisk: forceDisk,
-            device: activeDevice, continuation: continuation))
+            device: activeDevice, fileURL: fileURL, continuation: continuation))
         admitWaiters()
       }
     } onCancel: {
@@ -181,7 +185,9 @@ actor BinaryCache {
           continue
         }
         let freeMemory = memoryLimit - memoryBytes
-        let freeDisk = diskLimit - diskBytes
+        let retained = waiter.fileURL.flatMap { retainedFiles[$0] }
+        let storedBytes = retained?.size ?? 0
+        let freeDisk = diskLimit - diskBytes + storedBytes
         let inMemory: Bool
         if !waiter.forceDisk, waiter.size <= freeMemory,
           memoryHeadroom <= freeMemory - waiter.size, diskHeadroom <= freeDisk
@@ -192,7 +198,9 @@ actor BinaryCache {
           memoryHeadroom <= freeMemory
         {
           inMemory = false
-          diskBytes += waiter.size
+          diskBytes = diskBytes - storedBytes + waiter.size
+          if let fileURL = waiter.fileURL { retainedFiles.removeValue(forKey: fileURL) }
+          telemetry?.release(storedBytes, inMemory: false, device: waiter.device)
         } else {
           continue
         }
@@ -209,7 +217,8 @@ actor BinaryCache {
         waiter.continuation.resume(
           returning: Reservation(
             cache: self, id: waiter.id, size: waiter.size, inMemory: inMemory,
-            device: waiter.device, telemetry: telemetry))
+            device: waiter.device, telemetry: telemetry,
+            storedBytes: inMemory ? 0 : storedBytes))
         admitted = true
         break
       }
@@ -240,5 +249,29 @@ actor BinaryCache {
 
   func waitUntilUnused() async {
     while entryCount > 0 { try? await Task.sleep(for: .milliseconds(5)) }
+  }
+
+  func restoreDiskFiles(_ files: [URL: UInt64]) throws {
+    let total = files.values.reduce(UInt64(0), +)
+    guard total <= diskLimit - diskBytes else { throw BinaryCacheError.entryTooLarge(total) }
+    for (url, size) in files {
+      let device = telemetry?.register(url, role: "Cache") ?? self.device
+      retainedFiles[url] = (size, device)
+      diskBytes += size
+      telemetry?.reserve(size, inMemory: false, device: device)
+      telemetry?.stored(size, device: device)
+    }
+  }
+
+  func removedRetainedFile(_ url: URL) {
+    guard let retained = retainedFiles.removeValue(forKey: url) else { return }
+    diskBytes -= retained.size
+    telemetry?.release(retained.size, inMemory: false, device: retained.device)
+    telemetry?.removed(retained.size, device: retained.device)
+    admitWaiters()
+  }
+
+  func clearRetainedFiles() {
+    for url in Array(retainedFiles.keys) { removedRetainedFile(url) }
   }
 }

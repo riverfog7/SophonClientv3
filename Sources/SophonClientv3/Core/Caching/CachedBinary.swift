@@ -66,6 +66,7 @@ private final class CachedBinaryStorage: @unchecked Sendable {
   ) throws {
     self.reservation = reservation
     self.preserveFile = preserveFile
+    self.storedBytes = reservation.storedBytes
     if reservation.inMemory {
       self.fileURL = nil
       self.data = Data(count: Int(reservation.size))

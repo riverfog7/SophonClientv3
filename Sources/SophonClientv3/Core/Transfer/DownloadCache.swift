@@ -196,7 +196,11 @@ actor DownloadCache {
             }
           }
         }
+        try await runTransferIO { try removeOwnedFile(paths.partial) }
+        await cache.removedRetainedFile(paths.partial)
       }
+      telemetry.planDownload(
+        progressID, size: request.size, retained: context.receivedBytes, category: category)
       var lastError: (any Error)?
       for attempt in 0...maxRetries {
         try Task.checkCancellation()
@@ -700,6 +704,7 @@ private final class DownloadContext: @unchecked Sendable {
   }
 
   var useWholeRequest: Bool { lock.withLock { wholeRequest } }
+  var receivedBytes: UInt64 { lock.withLock { prefixes.reduce(0, +) } }
 
   func length(of range: Int) -> UInt64 {
     min(Self.blockSize, size - UInt64(range) * Self.blockSize)

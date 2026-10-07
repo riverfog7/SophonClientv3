@@ -152,10 +152,10 @@ private final class UpdateExecution: Sendable {
     self.journal = journal
     let activePlan = journal?.plan ?? plan
     self.plan = activePlan
+    let originals = stateDirectory.appendingPathComponent("originals", isDirectory: true)
     workspace = try await TransferWorkspace(
       settings: settings, gameDirectory: gameDirectory, operation: "update",
-      transport: downloadCache, io: io)
-    let originals = stateDirectory.appendingPathComponent("originals", isDirectory: true)
+      transport: downloadCache, io: io, recoveryDirectory: originals)
     originalsDirectory = originals
     let sizes = try await runTransferIO {
       try OriginalSnapshots.existingSizes(directory: originals)
@@ -269,7 +269,8 @@ private final class UpdateExecution: Sendable {
                     if await snapshots.requiresDisk(original)
                       || original.size > settings.memoryLimit
                     {
-                      diskHeadroom = max(diskHeadroom, original.size)
+                      diskHeadroom = max(
+                        diskHeadroom, await snapshots.additionalDiskBytes(original))
                     } else {
                       memoryHeadroom = max(memoryHeadroom, original.size)
                     }
