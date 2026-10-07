@@ -14,7 +14,7 @@ struct DownloadWorker: Sendable {
     if let cache {
       let cached = try await cache.get(downloadRequest)
       return try await runTransferIO {
-        defer { withExtendedLifetime(cached) {} }
+        defer { try? cached.release() }
         return try Data(contentsOf: cached.fileURL)
       }
     }

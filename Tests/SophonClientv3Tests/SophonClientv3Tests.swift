@@ -263,7 +263,7 @@ func testTransferDownloadRecovery(scenario: String) async throws {
   }
   let source =
     scenario == "prefetched" ? transferTestCache(root.appendingPathComponent("source")) : nil
-  if let source { _ = try await source.get(request) }
+  if let source { try await source.get(request).release() }
   let cache = transferTestCache(
     root,
     diskLimit: scenario == "prefetched"
@@ -295,6 +295,7 @@ func testTransferDownloadRecovery(scenario: String) async throws {
   }
   if scenario == "tampered" || scenario == "prefetched" {
     let path = try #require(downloaded).fileURL
+    try downloaded?.release()
     downloaded = nil
     try Data(repeating: 0, count: bytes.count).write(to: path)
     async let first = cache.get(request)
@@ -303,11 +304,14 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     #expect(try Data(contentsOf: verified.fileURL) == bytes)
     #expect(shared.fileURL == verified.fileURL)
     #expect(fixture.ranges.count == 2)
+    try verified.release()
+    try shared.release()
   }
   if scenario == "shared-budget" {
+    try downloaded?.release()
     downloaded = nil
     let firstCache = transferTestCache(root, diskLimit: request.size * 2)
-    do { _ = try await firstCache.get(request) }
+    try await firstCache.get(request).release()
     let secondURL = url.appendingPathComponent("second")
     let thirdURL = url.appendingPathComponent("third")
     let secondBytes = Data(repeating: 0xB8, count: bytes.count)
@@ -323,7 +327,7 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     let thirdRequest = DownloadRequest(
       chunkID: "third", url: thirdURL, md5: md5Hex(thirdBytes), size: request.size)
     let secondCache = transferTestCache(root, diskLimit: request.size * 2)
-    do { _ = try await secondCache.get(secondRequest) }
+    try await secondCache.get(secondRequest).release()
     let third = try await firstCache.get(thirdRequest)
     #expect(try Data(contentsOf: third.fileURL) == thirdBytes)
     var used: UInt64 = 0
@@ -341,10 +345,12 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     defer { TransferURLProtocol.remove(nextURL) }
     let nextRequest = DownloadRequest(
       chunkID: "second", url: nextURL, md5: md5Hex(nextBytes), size: request.size)
+    try downloaded?.release()
     downloaded = nil
     do {
       let next = try await cache.get(nextRequest)
       #expect(try Data(contentsOf: next.fileURL) == nextBytes)
+      try next.release()
     }
     let smaller = transferTestCache(root, diskLimit: request.size)
     let next = try await smaller.get(nextRequest)
@@ -366,6 +372,7 @@ func testTransferDownloadRecovery(scenario: String) async throws {
     #expect(nextFixture.ranges.isEmpty)
     waiting.cancel()
     await #expect(throws: CancellationError.self) { _ = try await waiting.value }
+    try downloaded?.release()
     downloaded = nil
     let next = try await cache.get(nextRequest)
     #expect(try Data(contentsOf: next.fileURL) == nextBytes)
@@ -436,6 +443,7 @@ func testTransferWorkingCache(scenario: String) async throws {
   if let prefetch {
     let cached = try await prefetch.get(request)
     try Data(repeating: 0, count: bytes.count).write(to: cached.fileURL)
+    try cached.release()
   }
   let transport = transferTestCache(downloads, cachedSource: prefetch)
   let workspace = try await TransferWorkspace(
@@ -733,7 +741,7 @@ func testTransferInterruptedUpdate(scenario: String) async throws {
       at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
     try fixture.old.write(to: original)
     try Data(repeating: 0xE1, count: fixture.new.count / 2).write(to: patch.target.fileURL)
-    _ = try await cache.get(#require(plan.patchBundles.first).downloadRequest())
+    try await cache.get(#require(plan.patchBundles.first).downloadRequest()).release()
   } else if scenario == "old-renamed" {
     try fixture.old.write(to: backup)
     try fixture.new.write(to: temporary)

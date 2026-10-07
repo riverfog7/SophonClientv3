@@ -90,6 +90,11 @@ private actor RepairTargets {
 private actor CachedPayloads {
   private var downloads: [URL: CachedDownload] = [:]
   func retain(_ download: CachedDownload) { downloads[download.fileURL] = download }
+
+  func releaseAll() throws {
+    for download in downloads.values { try download.release() }
+    downloads.removeAll()
+  }
 }
 
 private final class UpdateExecution: Sendable {
@@ -219,6 +224,7 @@ private final class UpdateExecution: Sendable {
         try journal?.complete()
       }
       await snapshots.close()
+      try await cachedPayloads.releaseAll()
       try await workspace.finish(completed: true)
       try await runTransferIO(checkCancellation: false) { [originalsDirectory] in
         try removeOwnedFile(originalsDirectory)
@@ -227,6 +233,7 @@ private final class UpdateExecution: Sendable {
       await reporter.record(.finished(.completed))
     } catch {
       await snapshots.close()
+      try? await cachedPayloads.releaseAll()
       try? await workspace.finish(completed: false)
       await reporter.record(.resourcesUpdated(workspace.telemetry.snapshot()))
       await reporter.record(

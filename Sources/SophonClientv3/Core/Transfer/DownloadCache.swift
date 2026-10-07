@@ -9,6 +9,8 @@ struct CachedDownload: Sendable {
   let size: UInt64
   // Protect the payload from eviction until the last consumer releases it.
   fileprivate let fileLock: TransferFileLock
+
+  func release() throws { try fileLock.close() }
 }
 
 private enum DownloadCacheError: Error {
@@ -112,12 +114,17 @@ actor DownloadCache {
       directory: directory, key: transferKey("\(request.md5.lowercased()):\(request.size)"))
     guard FileManager.default.fileExists(atPath: paths.ready.path) else { return nil }
     let lease = try await acquireLock(paths.lock, shared: true)
+    var handedOff = false
+    defer { if !handedOff { try? lease.close() } }
     let device = telemetry.register(paths.ready, role: "Predownload")
     guard
       let digest = try await runTransferIO({
         try digestFile(paths.ready, telemetry: telemetry, device: device)
       }), digest.size == request.size, digest.md5 == request.md5.lowercased()
-    else { return nil }
+    else {
+      return nil
+    }
+    handedOff = true
     return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: lease)
   }
 
@@ -143,7 +150,10 @@ actor DownloadCache {
         }
         let device = telemetry.register(payload.fileURL, role: "Predownload")
         let handle = try await runTransferIO { try FileHandle(forReadingFrom: payload.fileURL) }
-        defer { try? handle.close() }
+        defer {
+          try? handle.close()
+          try? payload.release()
+        }
         var offset: UInt64 = 0
         while let data = try await runTransferIO({
           try handle.read(upToCount: 1024 * 1024)
@@ -258,7 +268,8 @@ actor DownloadCache {
     let paths = DownloadPaths(directory: directory, key: key)
     let device = telemetry?.register(directory, role: "Predownload") ?? ""
     let (fileLock, readyExists) = try await acquirePayloadLock(paths)
-    defer { withExtendedLifetime(fileLock) {} }
+    var handedOff = false
+    defer { if !handedOff { try? fileLock.close() } }
 
     // Another process can finish or evict the payload while this lock is acquired.
     if let digest = try await runTransferIO({
@@ -269,9 +280,12 @@ actor DownloadCache {
       try fileLock.makeShared()
       telemetry?.ready(request.chunkID)
       telemetry?.stored(request.size, device: device)
+      handedOff = true
       return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: fileLock)
     }
     if readyExists {
+      // Drop our invalid payload's shared lock before competing to repair it.
+      try fileLock.unlock()
       while true {
         do {
           try await runTransferIO { try fileLock.makeExclusive() }
@@ -287,8 +301,10 @@ actor DownloadCache {
           {
             telemetry?.ready(request.chunkID)
             telemetry?.stored(request.size, device: device)
+            handedOff = true
             return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: fileLock)
           }
+          try fileLock.unlock()
           try await Task.sleep(for: .milliseconds(20))
         }
       }
@@ -298,6 +314,7 @@ actor DownloadCache {
         try fileLock.makeShared()
         telemetry?.ready(request.chunkID)
         telemetry?.stored(request.size, device: device)
+        handedOff = true
         return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: fileLock)
       }
     }
@@ -347,6 +364,7 @@ actor DownloadCache {
         try await finish(context: context, paths: paths)
         try fileLock.makeShared()
         telemetry?.ready(request.chunkID)
+        handedOff = true
         return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: fileLock)
       } catch {
         try Task.checkCancellation()

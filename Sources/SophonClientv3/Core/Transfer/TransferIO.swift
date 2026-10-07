@@ -98,6 +98,8 @@ enum TransferLockError: LocalizedError {
 final class TransferFileLock: @unchecked Sendable {
   private let handle: FileHandle
   private let fileURL: URL
+  private let stateLock = NSLock()
+  private var closed = false
 
   init(_ fileURL: URL, shared: Bool = false) throws {
     self.fileURL = fileURL
@@ -116,28 +118,33 @@ final class TransferFileLock: @unchecked Sendable {
     handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
   }
 
-  func makeShared() throws {
-    guard flock(handle.fileDescriptor, LOCK_SH | LOCK_NB) == 0 else {
-      let code = errno
-      if code == EWOULDBLOCK || code == EAGAIN { throw TransferLockError.busy(fileURL) }
-      throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
-    }
-  }
+  func makeShared() throws { try changeLock(LOCK_SH | LOCK_NB) }
 
-  func makeExclusive() throws {
-    guard flock(handle.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else {
-      let code = errno
-      if code == EWOULDBLOCK || code == EAGAIN {
-        throw TransferLockError.busy(fileURL)
+  func makeExclusive() throws { try changeLock(LOCK_EX | LOCK_NB) }
+
+  func unlock() throws { try changeLock(LOCK_UN) }
+
+  private func changeLock(_ operation: Int32) throws {
+    try stateLock.withLock {
+      guard !closed else { throw POSIXError(.EBADF) }
+      guard flock(handle.fileDescriptor, operation) == 0 else {
+        let code = errno
+        if code == EWOULDBLOCK || code == EAGAIN { throw TransferLockError.busy(fileURL) }
+        throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
       }
-      throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
     }
   }
 
-  deinit {
-    _ = flock(handle.fileDescriptor, LOCK_UN)
-    try? handle.close()
+  func close() throws {
+    try stateLock.withLock {
+      guard !closed else { return }
+      defer { closed = true }
+      _ = flock(handle.fileDescriptor, LOCK_UN)
+      try handle.close()
+    }
   }
+
+  deinit { try? close() }
 }
 
 actor WorkLimiter {
