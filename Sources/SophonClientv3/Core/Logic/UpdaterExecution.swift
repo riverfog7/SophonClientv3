@@ -9,6 +9,8 @@ extension Updater {
     installer: Installer, reporter: UpdateReporter, cacheOnly: Bool = false,
     gameID: String = "", mode: GameBranchCategoryScenario = .full, predownload: Bool = false
   ) async throws {
+    var settings = settings
+    settings.ioPolicy = settings.ioPolicy ?? .serialized
     let execution = try await UpdateExecution(
       plan: plan, gameDirectory: baseGameDir, settings: settings, downloadCache: downloadCache,
       installer: installer, downloadWorkers: maxCocurrentDownloads,
@@ -417,7 +419,7 @@ private final class UpdateExecution: Sendable {
         try handle.truncate(atOffset: file.size)
       }
     }
-    try await installer.execute(repairPlan)
+    try await installer.execute(repairPlan, serializedWrites: settings.ioPolicy == .serialized)
     if settings.ioPolicy == .serialized {
       // Flush the whole write batch before verification starts reading from the target drive.
       for output in paths.values {

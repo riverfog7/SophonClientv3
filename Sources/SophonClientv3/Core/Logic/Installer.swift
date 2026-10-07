@@ -318,7 +318,8 @@ final class Installer: Sendable {
   internal func execute(
     _ plan: InstallationPlan,
     reporter: InstallationReporter? = nil,
-    journal: InstallationJournal? = nil
+    journal: InstallationJournal? = nil,
+    serializedWrites: Bool = false
   ) async throws {
     await reporter?.record(.phaseChanged(.running))
     let requiredChunks = AsyncChannel<RequiredChunk>()
@@ -327,7 +328,7 @@ final class Installer: Sendable {
 
     let writeCoordinator = try ChunkWriteCoordinator(
       plannedFiles: plan.plannedFiles,
-      workerCount: maxCocurrentWrites,
+      workerCount: serializedWrites ? 1 : maxCocurrentWrites,
       maxCachedFileHandles: maxCachedFileHandles,
       reporter: reporter, journal: journal
     )

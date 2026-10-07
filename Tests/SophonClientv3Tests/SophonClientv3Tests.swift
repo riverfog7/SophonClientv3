@@ -386,10 +386,10 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
-  var settings = TransferSettings()
+  var settings = try JSONDecoder().decode(TransferSettings.self, from: Data("{}".utf8))
+  #expect(settings.ioPolicy == nil)
   settings.cacheDirectory = root.appendingPathComponent("cache").path
   settings.memoryLimit = 0
-  settings.ioPolicy = .serialized
   settings.writeMode = writeMode
   let plan = try transferTestPlan(root: root, fixture: fixture)
   let target = try #require(plan.installFiles.first)
@@ -412,7 +412,7 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   let installer = try Installer(
     baseGameDir: root, maxCocurrentChecks: 1, maxCocurrentDownloads: 2,
     maxCocurrentPostProcessors: 2,
-    maxCocurrentWrites: 1, downloadCache: cache)
+    maxCocurrentWrites: 2, downloadCache: cache)
   try await updater.execute(
     plan, settings: settings, downloadCache: cache, installer: installer,
     reporter: UpdateReporter(logger: .init(label: "test")), cacheOnly: true)

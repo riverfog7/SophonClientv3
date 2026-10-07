@@ -35,15 +35,15 @@ Useful options on `install` and `update`:
 | `--memory-cache-mib N` | 500 | RAM budget in MiB for original snapshots |
 | `--disk-cache-gib N` | 10 | Limit in GiB for each download/snapshot/original disk pool |
 | `--cache-entry-limit N` | 500 | Maximum entries admitted to a cache queue |
-| `--io-policy parallel` | parallel | Concurrent file work for SSDs |
-| `--io-policy serialized` | | One target reader/writer at a time for slow drives |
+| `--io-policy parallel` | Install | Concurrent target file work using configured worker counts |
+| `--io-policy serialized` | Update | One target reader/writer at a time, including repair writes |
 | `--stateless` | Off | Rebuild work from files instead of trusting saved checkpoints |
 
 Originals exceeding the RAM budget spill to disk. In-place originals and originals needed by another update target remain on disk until their consumers finish. Download-cache pins and byte limits provide backpressure while patch workers consume bundles. Insufficient capacity for one payload, required originals, or a complete predownload fails with an error. Unfinished partial downloads are retained rather than evicted; unrelated stale partials may require a larger cache or manual removal when no operation is using it.
 
 These are cache-storage limits, not a process memory cap or a total filesystem quota. The RAM limit covers updater original snapshots; manifests, native patch buffers, installer chunks, and HTTP buffers use additional memory. Disk limits count logical payload bytes separately for downloads, transient snapshots, and durable originals. Filesystem allocation, journals/state, and target temporary files add disk use. Lowering a disk limit trims idle completed downloads on first cache access; retained partial downloads or active pins can prevent fitting the new limit.
 
-Serialized mode keeps target reads and writes separate, flushing verified output before the next read, while HTTP transfers and cache I/O continue on the fast drive. Installer scanning already precedes target writes. Parallel mode uses the configured download/write counts. These policies do not measure the hardware or promise a particular throughput.
+Updates use serialized target I/O by default, including cache-only source checks and repair writes. Serialized mode keeps target reads and writes separate, flushing verified output before the next read, while HTTP transfers and cache I/O continue on the fast drive. Installations keep parallel target I/O by default; installer scanning already precedes target writes. Use `--io-policy parallel` to enable the configured update patch worker count. These policies do not measure the hardware or promise a particular throughput.
 
 SIGINT/SIGTERM cancel queued work and drain an active native patch write before exiting. A forced kill retains the last recorded state. Separate processes cannot modify the same game directory concurrently.
 
@@ -61,6 +61,8 @@ Start `.build/debug/SophonCLI rpc` for newline-delimited JSON-RPC 2.0 on stdin/s
 `install.start` and `update.start` return an operation ID immediately. Stdio emits `operation.progress` and `operation.finished` notifications. `operation.wait` waits for the final status; cancellation remains available while it waits. Status for the most recent 128 completed operations is kept in the process. `state.inspect` needs only `directory`, optional `transfer`, and optional `operation` (`update` by default or `install`); it reads persisted state without contacting the API.
 
 Operation parameters: `game`, `directory`, optional `cn`, `mode` (`full`/`base`), `voicePacks` and `predownload` (installation), `downloads` (8), `writes` (4), and `transfer`. `sourceVersion` is optional for updates. `predownload: true` selects the future branch, and `cacheOnly: true` caches update/repair data without applying it. `game.version` reports executable-based detection, and `game.nextAction` returns a decision without executing it. Transfer fields use bytes for `memoryLimit` and `diskLimit`, an `entryLimit` of 500 by default, and `writeMode: "temporary"` or `"in-place"`. Set `transfer.preserveState: false` for a fresh verification.
+
+Omitting `transfer.ioPolicy` uses serialized updates and parallel installations. Set it to `"parallel"` to let updates use the `writes` worker count, or `"serialized"` to serialize installation target I/O too.
 
 For HTTP, run:
 

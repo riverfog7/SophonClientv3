@@ -17,8 +17,8 @@ struct TransferCLIOptions: ParsableArguments, Sendable {
   var diskCacheGiB = 10
   @Option(help: "Maximum queued cache entries.")
   var cacheEntryLimit = 500
-  @Option(help: "Target I/O policy: parallel for SSDs, serialized for microSD/HDD/iSCSI.")
-  var ioPolicy: StorageIOPolicy = .parallel
+  @Option(help: "Target I/O: serialized by default for updates, parallel for installs.")
+  var ioPolicy: StorageIOPolicy?
   @Option(help: "Update output mode: temporary replacement or in-place overwrite.")
   var writeMode: UpdateWriteMode = .temporaryReplacement
   @Flag(
@@ -63,7 +63,8 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
   var cacheOnly = false
   @Option(help: "Installation category scenario: full or base.") var mode = "full"
   @Option(help: "Maximum parallel HTTP range downloads.") var maxConcurrentDownloads = 8
-  @Option(help: "Maximum parallel file patch workers.") var maxConcurrentWrites = 4
+  @Option(help: "Maximum file patch workers when --io-policy parallel is selected.")
+  var maxConcurrentWrites = 4
   @Flag(help: "Print the selected update plan without applying it.") var plan = false
   @OptionGroup var transfer: TransferCLIOptions
 
