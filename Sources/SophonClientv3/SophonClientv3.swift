@@ -185,7 +185,8 @@ public final class SophonClientv3: @unchecked Sendable {
         plan, settings: transferSettings,
         downloadCache: cacheOnly ? predownloadCache : downloadCache, installer: installer,
         reporter: reporter, cacheOnly: cacheOnly, gameID: gameID, mode: mode,
-        predownload: predownload)
+        predownload: predownload,
+        finalize: { [self] in try writeGameConfig(version: plan.targetVersion) })
     } catch {
       await reporter.record(
         .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
@@ -332,6 +333,45 @@ public final class SophonClientv3: @unchecked Sendable {
       at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
     try (languages.joined(separator: "\n") + "\n").write(
       to: file, atomically: true, encoding: .utf8)
+  }
+
+  private func writeGameConfig(version: String) throws {
+    let file = baseGameDir.appendingPathComponent("config.ini")
+    let contents: String
+    do {
+      contents = try String(contentsOf: file, encoding: .utf8)
+    } catch {
+      if !isMissingFile(error) { throw error }
+      contents = ""
+    }
+    let newline = contents.contains("\r\n") ? "\r\n" : "\n"
+    let bom = contents.hasPrefix("\u{feff}") ? "\u{feff}" : ""
+    var lines = String(contents.dropFirst(bom.count))
+      .replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+    if let start = lines.firstIndex(where: {
+      $0.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("[general]")
+    }) {
+      let end =
+        lines.indices.dropFirst(start + 1).first {
+          lines[$0].trimmingCharacters(in: .whitespaces).hasPrefix("[")
+        } ?? lines.count
+      var found = false
+      for index in (start + 1)..<end {
+        guard let equal = lines[index].firstIndex(of: "="),
+          lines[index][..<equal].trimmingCharacters(in: .whitespaces).lowercased() == "game_version"
+        else { continue }
+        lines[index] = String(lines[index][...equal]) + version
+        found = true
+      }
+      if !found { lines.insert("game_version=\(version)", at: start + 1) }
+    } else {
+      if lines.last == "" { lines.removeLast() }
+      lines += ["[General]", "game_version=\(version)", ""]
+    }
+    let updated = bom + lines.joined(separator: newline)
+    if updated != contents {
+      try updated.write(to: file, atomically: true, encoding: .utf8)
+    }
   }
 
   private func decodeResCategory() throws -> Set<ResCategory> {
@@ -515,7 +555,10 @@ public final class SophonClientv3: @unchecked Sendable {
       try await installer.install(
         plan, reporter: reporter, journal: journal, finishReport: false)
       try writeInstalledVoicePacks(additionalVoicePackMatchingFields)
-      try await runTransferIO(checkCancellation: false) { try journal?.complete() }
+      try await runTransferIO(checkCancellation: false) { [self] in
+        try writeGameConfig(version: liveTarget)
+        try journal?.complete()
+      }
       await reporter.record(.finished(.completed))
     } catch {
       if error is CancellationError || Task.isCancelled {

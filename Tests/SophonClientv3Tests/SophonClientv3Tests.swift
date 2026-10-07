@@ -525,7 +525,10 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
     maxCocurrentWrites: 2, downloadCache: cache)
   try await updater.execute(
     plan, settings: cacheSettings, downloadCache: predownload, installer: installer,
-    reporter: UpdateReporter(logger: .init(label: "test")), cacheOnly: true)
+    reporter: UpdateReporter(logger: .init(label: "test")), cacheOnly: true,
+    finalize: {
+      throw SophonClientError.UnknownError("Download-only runs must not finalize game files")
+    })
   #expect(!FileManager.default.fileExists(atPath: target.fileURL.path))
   #expect(FileManager.default.fileExists(atPath: deletion.fileURL.path))
   #expect(bundleFixture.ranges.count == 1)
@@ -588,7 +591,7 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   #expect(bundleFixture.ranges.count == 1)
 }
 
-@Test(arguments: ["ram", "spill", "mixed", "all-current"])
+@Test(arguments: ["ram", "spill", "mixed", "all-current", "finalization-failed"])
 func testTransferLiveUpdate(scenario: String) async throws {
   let fixture = try loadHDiffFixture()
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -599,7 +602,7 @@ func testTransferLiveUpdate(scenario: String) async throws {
   settings.memoryLimit = scenario == "spill" ? 0 : 1024 * 1024
   settings.diskLimit = 1024 * 1024
   settings.diskCacheEnabled = scenario == "spill"
-  settings.preserveState = false
+  settings.preserveState = scenario == "finalization-failed"
   var plan = try transferTestPlan(root: root, fixture: fixture)
   var bundleBytes = fixture.patch
   let first = try #require(plan.installFiles.first)
@@ -638,14 +641,35 @@ func testTransferLiveUpdate(scenario: String) async throws {
     baseGameDir: root, maxCocurrentChecks: 1, maxCocurrentDownloads: 2,
     maxCocurrentPostProcessors: 2, maxCocurrentWrites: 2, downloadCache: cache)
   let reporter = UpdateReporter(logger: .init(label: "test"))
+  if scenario == "finalization-failed" {
+    let failed = UpdateReporter(logger: .init(label: "test"))
+    await #expect(throws: SophonClientError.self) {
+      try await updater.execute(
+        plan, settings: settings, downloadCache: cache, installer: installer, reporter: failed,
+        finalize: { throw SophonClientError.UnknownError("Cannot write game configuration") })
+    }
+    #expect(
+      try await SophonClientv3.savedUpdateState(at: root, settings: settings)?.finished == false)
+    #expect(try Data(contentsOf: first.fileURL) == fixture.new)
+    if case .failed? = await failed.snapshot().outcome {
+    } else {
+      Issue.record("Configuration failure was reported as a completed update")
+    }
+  }
   try await updater.execute(
     plan, settings: settings, downloadCache: cache, installer: installer, reporter: reporter)
   let progress = await reporter.snapshot()
   #expect(progress.completedFiles == plan.installFiles.count)
   #expect(progress.repairFiles == 0)
-  #expect(progress.skippedFiles == (scenario == "mixed" || scenario == "all-current" ? 1 : 0))
+  #expect(
+    progress.skippedFiles
+      == (scenario == "mixed" || scenario == "all-current" || scenario == "finalization-failed"
+        ? 1 : 0))
   #expect(network.ranges.count == (scenario == "all-current" ? 0 : 1))
-  #expect(progress.totalPatchBytes == (scenario == "all-current" ? 0 : UInt64(bundleBytes.count)))
+  #expect(
+    progress.totalPatchBytes
+      == (scenario == "all-current" || scenario == "finalization-failed"
+        ? 0 : UInt64(bundleBytes.count)))
   #expect(progress.remainingPatchBytes == 0)
   #expect(progress.resources?.memoryBytes == 0)
   #expect(

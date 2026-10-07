@@ -7,7 +7,8 @@ extension Updater {
   func execute(
     _ plan: UpdatePlan, settings: TransferSettings, downloadCache: DownloadCache,
     installer: Installer, reporter: UpdateReporter, cacheOnly: Bool = false,
-    gameID: String = "", mode: GameBranchCategoryScenario = .full, predownload: Bool = false
+    gameID: String = "", mode: GameBranchCategoryScenario = .full, predownload: Bool = false,
+    finalize: @escaping @Sendable () throws -> Void = {}
   ) async throws {
     var settings = settings
     settings.ioPolicy = settings.ioPolicy ?? .serialized
@@ -15,7 +16,7 @@ extension Updater {
       plan: plan, gameDirectory: baseGameDir, settings: settings, downloadCache: downloadCache,
       installer: installer, downloadWorkers: maxCocurrentDownloads,
       writeWorkers: maxCocurrentWrites, reporter: reporter, cacheOnly: cacheOnly,
-      gameID: gameID, mode: mode, predownload: predownload)
+      gameID: gameID, mode: mode, predownload: predownload, finalize: finalize)
     let sampling = Task {
       while !Task.isCancelled {
         await reporter.record(.resourcesUpdated(execution.workspace.telemetry.snapshot()))
@@ -100,6 +101,7 @@ private final class UpdateExecution: Sendable {
   private let downloadCache: DownloadCache
   private let installer: Installer
   private let reporter: UpdateReporter
+  private let finalize: @Sendable () throws -> Void
   private let journal: UpdateJournal?
   private let operationLock: TransferFileLock
   private let snapshots: OriginalSnapshots
@@ -112,7 +114,8 @@ private final class UpdateExecution: Sendable {
   init(
     plan: UpdatePlan, gameDirectory: URL, settings: TransferSettings, downloadCache: DownloadCache,
     installer: Installer, downloadWorkers: Int, writeWorkers: Int, reporter: UpdateReporter,
-    cacheOnly: Bool, gameID: String, mode: GameBranchCategoryScenario, predownload: Bool
+    cacheOnly: Bool, gameID: String, mode: GameBranchCategoryScenario, predownload: Bool,
+    finalize: @escaping @Sendable () throws -> Void
   ) async throws {
     guard cacheOnly || settings.diskCacheEnabled || settings.writeMode != .inPlace else {
       throw SophonClientError.UnknownError(
@@ -125,6 +128,7 @@ private final class UpdateExecution: Sendable {
     self.installer = installer
     self.downloadWorkers = downloadWorkers
     self.reporter = reporter
+    self.finalize = finalize
     io = WorkLimiter(limit: settings.ioPolicy == .serialized ? 1 : Int.max)
     workers = (0..<(settings.ioPolicy == .serialized ? 1 : writeWorkers)).map(PatchApplyWorker.init)
     operationLock = try await runTransferIO {
@@ -210,7 +214,10 @@ private final class UpdateExecution: Sendable {
           await reporter.record(.fileDeleted(fileURL: file.fileURL, bytes: removed ? file.size : 0))
         }
       }
-      try await runTransferIO(checkCancellation: false) { [journal] in try journal?.complete() }
+      try await runTransferIO(checkCancellation: false) { [self] in
+        if !cacheOnly { try finalize() }
+        try journal?.complete()
+      }
       await snapshots.close()
       try await workspace.finish(completed: true)
       try await runTransferIO(checkCancellation: false) { [originalsDirectory] in
