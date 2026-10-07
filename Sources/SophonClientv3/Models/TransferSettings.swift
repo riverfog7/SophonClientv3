@@ -14,8 +14,9 @@ public struct TransferSettings: Codable, Sendable {
   public var cacheDirectory: String?
   public var predownloadDirectory: String?
   public var stateDirectory: String?
-  public var memoryLimit: UInt64 = 500 * 1024 * 1024
+  public var memoryLimit: UInt64 = 1024 * 1024 * 1024
   public var diskLimit: UInt64 = 10 * 1024 * 1024 * 1024
+  public var diskCacheEnabled = true
   public var entryLimit: Int = 500
   /// Defaults to serialized target I/O for updates and parallel target I/O for installations.
   public var ioPolicy: StorageIOPolicy?
@@ -46,7 +47,7 @@ public struct TransferSettings: Codable, Sendable {
 
   private enum CodingKeys: String, CodingKey {
     case cacheDirectory, predownloadDirectory, stateDirectory, memoryLimit, diskLimit, entryLimit
-    case ioPolicy, writeMode, preserveState
+    case ioPolicy, writeMode, preserveState, diskCacheEnabled
   }
 
   public init(from decoder: any Decoder) throws {
@@ -57,6 +58,8 @@ public struct TransferSettings: Codable, Sendable {
     stateDirectory = try values.decodeIfPresent(String.self, forKey: .stateDirectory)
     memoryLimit = try values.decodeIfPresent(UInt64.self, forKey: .memoryLimit) ?? memoryLimit
     diskLimit = try values.decodeIfPresent(UInt64.self, forKey: .diskLimit) ?? diskLimit
+    diskCacheEnabled =
+      try values.decodeIfPresent(Bool.self, forKey: .diskCacheEnabled) ?? diskCacheEnabled
     entryLimit = try values.decodeIfPresent(Int.self, forKey: .entryLimit) ?? entryLimit
     ioPolicy = try values.decodeIfPresent(StorageIOPolicy.self, forKey: .ioPolicy)
     writeMode = try values.decodeIfPresent(UpdateWriteMode.self, forKey: .writeMode) ?? writeMode

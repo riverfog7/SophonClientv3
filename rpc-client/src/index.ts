@@ -7,6 +7,7 @@ export interface TransferSettings {
   stateDirectory?: string;
   memoryLimit?: number;
   diskLimit?: number;
+  diskCacheEnabled?: boolean;
   entryLimit?: number;
   ioPolicy?: "parallel" | "serialized";
   writeMode?: "temporary" | "in-place";

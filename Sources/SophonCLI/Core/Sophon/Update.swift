@@ -11,10 +11,12 @@ struct TransferCLIOptions: ParsableArguments, Sendable {
   var cacheDirectory: String?
   @Option(help: "Operation state directory; defaults to a directory within the cache.")
   var stateDirectory: String?
-  @Option(name: .customLong("memory-cache-mib"), help: "RAM snapshot cache limit in MiB.")
-  var memoryCacheMiB = 500
-  @Option(name: .customLong("disk-cache-gib"), help: "Limit in GiB for each disk cache.")
+  @Option(name: .customLong("memory-cache-mib"), help: "Shared working RAM cache limit in MiB.")
+  var memoryCacheMiB = 1024
+  @Option(name: .customLong("disk-cache-gib"), help: "Maximum disk spill in GiB for this run.")
   var diskCacheGiB = 10
+  @Flag(help: "Keep live working data in RAM; explicit --cache-at downloads still use disk.")
+  var noDiskCache = false
   @Option(help: "Maximum queued cache entries.")
   var cacheEntryLimit = 500
   @Option(help: "Target I/O: serialized by default for updates, parallel for installs.")
@@ -40,6 +42,7 @@ struct TransferCLIOptions: ParsableArguments, Sendable {
     settings.stateDirectory = stateDirectory
     settings.memoryLimit = UInt64(memoryCacheMiB) * 1024 * 1024
     settings.diskLimit = UInt64(diskCacheGiB) * 1024 * 1024 * 1024
+    settings.diskCacheEnabled = !noDiskCache
     settings.entryLimit = cacheEntryLimit
     settings.ioPolicy = ioPolicy
     settings.writeMode = writeMode
