@@ -10,6 +10,8 @@ The release CLI also passed isolated local-HTTP checks using a 9,415-byte HDIFF 
 
 Current release stdio and HTTP RPC checks accepted disk caching disabled with a zero disk limit. No new game installation, physical microSD measurement, or macOS run was performed in this follow-up. Existing game installations and the protected archive were untouched.
 
+Config finalization was then checked with a release build and the same focused suite, now covering 37 cases. Client-level CLI fixtures confirmed version-file creation after installation/update, preserving existing channel/plugin values, other sections, and CRLF line endings, and leaving both existing and absent configs untouched during predownloads. An intentionally unwritable config caused failure with unfinished state; correcting the config path and repeating the update completed without another payload request. These checks used temporary fixture directories.
+
 Tested on Linux on 2026-10-07, using the debug SophonCLI through its stdio JSON-RPC transport. Checks and measurements used the actual game manifests and CDN payloads. No game launch or macOS hardware test is claimed.
 
 ## ZZZ installation and recovery
