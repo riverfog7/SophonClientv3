@@ -94,7 +94,28 @@ Installation progress exposes the reporter's full snapshot, including `totalDown
 
 **A resolved `wait()` is not a success signal.** Failed and cancelled operations also return a final status. Check `result.status === "completed"`. `wait()` and `cancel()` can run concurrently. Aborting a client request only stops waiting for that request; use `cancel(operationID)` to cancel the CLI operation.
 
-Synchronous and asynchronous notification-listener failures are isolated from parsing and transport errors. `onNotificationError` can report UI exceptions without closing the client.
+Stdio sends `operation.progress` notifications with `kind: "install" | "update"`, an `events` array of up to 128 raw reporter events, and the latest `progress` snapshot. The sender takes whatever is already queued; it never waits for a timer or a full batch. Events remain ordered within an operation and none are sampled out. The snapshot may reflect events not yet delivered, so use it for authoritative totals rather than as an event-log checkpoint.
+
+```ts
+const unsubscribe = client.onProgressBatch(batch => {
+  updateProgressDisplay(batch.progress);
+  if (batch.kind === "install") {
+    for (const event of batch.events) {
+      if ("chunkDownloaded" in event) {
+        recordChunk(event.chunkDownloaded.chunkID, event.chunkDownloaded.bytes);
+      }
+    }
+  }
+});
+```
+
+Events use Swift's tagged-enum encoding, for example `{ "chunkDownloaded": { "chunkID": "id", "bytes": 1024 } }`. Unlabelled associated values use `_0`, such as `{ "phaseChanged": { "_0": "scanning" } }`. `onNotification()` still receives the same batch notification; `onProgressBatch()` adds typed filtering. Synchronous and asynchronous listener failures are isolated from transport errors. `onNotificationError` can report UI exceptions without closing the client. The Node and Neutralino adapters share this behavior; HTTP remains status polling without raw event delivery.
+
+The collector and reporter never wait for transport delivery. A slow client can grow the intentionally unbounded RAM event backlog; the file-cache memory limit does not cap that queue. There is no disk event spool or overflow dropping. Encoding and writes run in the sender, with RPC replies prioritized before its next notification write.
+
+If the writer fails, its event subscription ends and releases the undeliverable backlog. The reporter remains usable; existing process-exit/cancellation behavior still applies when the host closes stdin.
+
+`status()` and `wait()` report actual operation state independently of notification delivery. They may report completion while events are still queued. `operation.finished` follows that operation's event batches, and normal `rpc.shutdown` drains them before acknowledging shutdown.
 
 `close()` is idempotent and bounded. For owned stdio processes it requests `rpc.shutdown`, closes stdin, then tries termination and force termination if necessary. Configure `shutdownTimeoutMs` (default 5,000) and `terminationTimeoutMs` (default 1,000) for slow target storage. Force termination can interrupt an active write; the CLI's saved operation state handles subsequent recovery. Neutralino 4.11 lacks a force-kill argument, so the adapter checks the active virtual ID/PID and uses `os.execCommand("kill -KILL <pid>")` as its final Linux/macOS fallback.
 
