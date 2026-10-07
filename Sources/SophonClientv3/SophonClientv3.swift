@@ -29,7 +29,7 @@ public final class SophonClientv3: @unchecked Sendable {
   {
     guard settings.maxRetries >= 0, settings.retryInterval >= 0,
       settings.maxCocurrentDownloads > 0, settings.transfer.entryLimit > 0,
-      settings.transfer.diskLimit > 0
+      !settings.transfer.diskCacheEnabled || settings.transfer.diskLimit > 0
     else { throw SophonClientError.UnknownError("Invalid worker, retry, or cache settings") }
     self.baseGameDir = baseGameDir.standardizedFileURL.resolvingSymlinksInPath()
     self.gameID = settings.gameID
@@ -75,7 +75,9 @@ public final class SophonClientv3: @unchecked Sendable {
       diskLimit: UInt64(Int64.max), maxConcurrentDownloads: settings.maxCocurrentDownloads,
       maxRetries: settings.maxRetries, retryInterval: settings.retryInterval)
     self.downloadCache = DownloadCache(
-      directory: settings.transfer.cacheURL.appendingPathComponent("downloads"),
+      directory: settings.transfer.cacheURL.appendingPathComponent("working")
+        .appendingPathComponent(transferKey(self.baseGameDir.path))
+        .appendingPathComponent("update/downloads"),
       diskLimit: settings.transfer.diskLimit,
       maxConcurrentDownloads: settings.maxCocurrentDownloads,
       maxRetries: settings.maxRetries, retryInterval: settings.retryInterval,
@@ -90,7 +92,7 @@ public final class SophonClientv3: @unchecked Sendable {
         ? 1 : settings.maxCocurrentWrites,
       maxRetries: settings.maxRetries,
       retryInterval: settings.retryInterval, maxCachedFileHandles: settings.maxCachedFileHandles,
-      downloadCache: self.downloadCache)
+      downloadCache: self.downloadCache, transferSettings: transferSettings)
     self.updater = try Updater(
       baseGameDir: self.baseGameDir, maxCocurrentDownloads: settings.maxCocurrentDownloads,
       maxCocurrentWrites: settings.maxCocurrentWrites)

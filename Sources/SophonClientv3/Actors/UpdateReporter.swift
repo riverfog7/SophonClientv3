@@ -30,6 +30,17 @@ public actor UpdateReporter: OperationReportingInternal {
       progress.totalDeleteFiles = deleteFiles
       progress.totalDeleteBytes = deleteBytes
       logger.info("Update planned", metadata: ["source": "\(source)", "target": "\(target)"])
+      progress.remainingPatchBytes = patchBytes
+    case .patchDownloadsPlanned(let bytes):
+      progress.totalPatchBytes = bytes
+      progress.remainingPatchBytes = bytes - min(bytes, progress.receivedPatchBytes)
+    case .resourcesUpdated(let resources):
+      progress.resources = resources
+      progress.receivedPatchBytes = resources.receivedBytes
+      progress.retainedPatchBytes = resources.retainedBytes
+      progress.transferredPatchBytes = resources.transferredBytes
+      progress.remainingPatchBytes =
+        progress.totalPatchBytes - min(progress.totalPatchBytes, resources.receivedBytes)
     case .bundleDownloaded(let id, let bytes):
       progress.downloadedBytes += bytes
       logger.debug("Patch bundle ready", metadata: ["patch.id": "\(id)", "bytes": "\(bytes)"])

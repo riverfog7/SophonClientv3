@@ -63,10 +63,12 @@ actor DownloadCache {
     }
   }
 
-  func get(_ request: DownloadRequest, waitForSpace: Bool = true) async throws -> CachedDownload {
+  func get(
+    _ request: DownloadRequest, waitForSpace: Bool = true, telemetry: TransferTelemetry? = nil
+  ) async throws -> CachedDownload {
     try Task.checkCancellation()
     if let cachedSource, try await cachedSource.contains(request) {
-      return try await cachedSource.get(request, waitForSpace: false)
+      return try await cachedSource.get(request, waitForSpace: false, telemetry: telemetry)
     }
     let key = transferKey("\(request.md5.lowercased()):\(request.size)")
     if !checkedInitialCapacity {
@@ -81,24 +83,188 @@ actor DownloadCache {
       }
       checkedInitialCapacity = true
     }
-    return try await fetch(request, key: key, waitForSpace: waitForSpace)
+    if let telemetry {
+      telemetry.planDownload(
+        request.chunkID, size: request.size,
+        retained: try await retainedBytes(request, directory: directory))
+    }
+    return try await fetch(request, key: key, waitForSpace: waitForSpace, telemetry: telemetry)
   }
 
-  private func fetch(_ request: DownloadRequest, key: String, waitForSpace: Bool) async throws
+  func retainedBytes(_ request: DownloadRequest, directory: URL? = nil) async throws -> UInt64 {
+    if let cachedSource, try await cachedSource.contains(request) { return request.size }
+    if try await contains(request) { return request.size }
+    let paths = DownloadPaths(
+      directory: directory ?? self.directory,
+      key: transferKey("\(request.md5.lowercased()):\(request.size)"))
+    return try await runTransferIO {
+      guard FileManager.default.fileExists(atPath: paths.partial.path) else { return 0 }
+      return try DownloadContext.savedRanges(paths: paths, size: request.size).reduce(0) {
+        $0 + $1.upperBound - $1.lowerBound
+      }
+    }
+  }
+
+  private func cached(
+    _ request: DownloadRequest, telemetry: TransferTelemetry
+  ) async throws -> CachedDownload? {
+    let paths = DownloadPaths(
+      directory: directory, key: transferKey("\(request.md5.lowercased()):\(request.size)"))
+    guard FileManager.default.fileExists(atPath: paths.ready.path) else { return nil }
+    let lease = try await acquireLock(paths.lock, shared: true)
+    let device = telemetry.register(paths.ready, role: "Predownload")
+    guard
+      let digest = try await runTransferIO({
+        try digestFile(paths.ready, telemetry: telemetry, device: device)
+      }), digest.size == request.size, digest.md5 == request.md5.lowercased()
+    else { return nil }
+    return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: lease)
+  }
+
+  func getWorking(
+    _ request: DownloadRequest, directory: URL, cache: BinaryCache, purpose: BinaryCache.Purpose,
+    telemetry: TransferTelemetry, io: WorkLimiter, category: String = "patch"
+  ) async throws -> CachedBinary {
+    let paths = DownloadPaths(
+      directory: directory, key: transferKey("\(request.md5.lowercased()):\(request.size)"))
+    let retained = try await retainedBytes(request, directory: directory)
+    if !FileManager.default.fileExists(atPath: paths.partial.path) {
+      try await runTransferIO { try removeOwnedFile(paths.index) }
+    }
+    let progressID = category == "patch" ? request.chunkID : "\(category):\(request.chunkID)"
+    telemetry.planDownload(progressID, size: request.size, retained: retained, category: category)
+    let writer = try await cache.makeWriter(
+      expectedSize: request.size, purpose: purpose, fileURL: paths.partial, preserveFile: true)
+    do {
+      let source = cachedSource ?? self
+      let copied = try await io.withPermit {
+        guard let payload = try await source.cached(request, telemetry: telemetry) else {
+          return false
+        }
+        let device = telemetry.register(payload.fileURL, role: "Predownload")
+        let handle = try await runTransferIO { try FileHandle(forReadingFrom: payload.fileURL) }
+        defer { try? handle.close() }
+        var offset: UInt64 = 0
+        while let data = try await runTransferIO({
+          try handle.read(upToCount: 1024 * 1024)
+        }), !data.isEmpty {
+          telemetry.read(UInt64(data.count), device: device)
+          try await writer.write(data, at: offset)
+          offset += UInt64(data.count)
+        }
+        guard offset == request.size else { throw BinaryCacheError.unexpectedEndOfFile }
+        return true
+      }
+      if copied {
+        let binary = try await writer.finish()
+        guard try await runTransferIO({ try binary.checksum() }) == request.md5.lowercased() else {
+          try binary.removeFile()
+          throw SophonClientError.InvalidChecksumError(
+            expected: request.md5, actual: "cached payload")
+        }
+        telemetry.ready(progressID)
+        return binary
+      }
+      let context = try await runTransferIO {
+        try DownloadContext(
+          paths: paths, request: request, writer: writer, telemetry: telemetry,
+          progressID: progressID)
+      }
+      defer { context.close() }
+      if writer.inMemory {
+        let ranges = try await runTransferIO {
+          try DownloadContext.savedRanges(paths: paths, size: request.size)
+        }
+        if !ranges.isEmpty {
+          try await io.withPermit {
+            let device = telemetry.register(paths.partial, role: "Cache")
+            let handle = try await runTransferIO { try FileHandle(forReadingFrom: paths.partial) }
+            defer { try? handle.close() }
+            for range in ranges {
+              var offset = range.lowerBound
+              while offset < range.upperBound {
+                let count = Int(min(1024 * 1024, range.upperBound - offset))
+                let data = try await runTransferIO {
+                  try handle.seek(toOffset: offset)
+                  return try handle.read(upToCount: count) ?? Data()
+                }
+                guard !data.isEmpty else { throw BinaryCacheError.unexpectedEndOfFile }
+                telemetry.read(UInt64(data.count), device: device)
+                try await writer.write(data, at: offset)
+                offset += UInt64(data.count)
+              }
+            }
+          }
+        }
+      }
+      var lastError: (any Error)?
+      for attempt in 0...maxRetries {
+        try Task.checkCancellation()
+        do {
+          try await transfer(request, context: context)
+          let checksum = try await runTransferIO { try writer.preview().checksum() }
+          guard checksum == request.md5.lowercased() else {
+            try await runTransferIO { try context.reset() }
+            throw SophonClientError.InvalidChecksumError(expected: request.md5, actual: checksum)
+          }
+          let binary = try await writer.finish()
+          telemetry.ready(progressID)
+          return binary
+        } catch {
+          try Task.checkCancellation()
+          if let error = error as? SophonClientError,
+            case .InvalidHTTPStatus(let code) = error,
+            (400..<500).contains(code), code != 408, code != 429
+          {
+            throw error
+          }
+          lastError = error
+          if attempt < maxRetries { try await Task.sleep(for: .seconds(retryInterval)) }
+        }
+      }
+      throw lastError ?? SophonClientError.UnknownError("Download failed")
+    } catch {
+      writer.pause()
+      throw error
+    }
+  }
+
+  private func transfer(_ request: DownloadRequest, context: DownloadContext) async throws {
+    if context.useWholeRequest {
+      try await transferWhole(request, context: context)
+    } else {
+      do { try await transferRanges(request, context: context) } catch DownloadCacheError
+        .rangeUnsupported
+      {
+        try await runTransferIO { try context.disableRanges() }
+        try await transferWhole(request, context: context)
+      }
+    }
+  }
+
+  private func fetch(
+    _ request: DownloadRequest, key: String, waitForSpace: Bool,
+    telemetry: TransferTelemetry?
+  ) async throws
     -> CachedDownload
   {
     guard request.size <= diskLimit, request.size <= UInt64(Int64.max) else {
       throw BinaryCacheError.entryTooLarge(request.size)
     }
     let paths = DownloadPaths(directory: directory, key: key)
+    let device = telemetry?.register(directory, role: "Predownload") ?? ""
     let (fileLock, readyExists) = try await acquirePayloadLock(paths)
     defer { withExtendedLifetime(fileLock) {} }
 
     // Another process can finish or evict the payload while this lock is acquired.
-    if let digest = try await runTransferIO({ try digestFile(paths.ready) }),
+    if let digest = try await runTransferIO({
+      try digestFile(paths.ready, telemetry: telemetry, device: device)
+    }),
       digest.size == request.size, digest.md5 == request.md5.lowercased()
     {
       try fileLock.makeShared()
+      telemetry?.ready(request.chunkID)
+      telemetry?.stored(request.size, device: device)
       return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: fileLock)
     }
     if readyExists {
@@ -115,6 +281,8 @@ actor DownloadCache {
           if let digest = try await runTransferIO({ try digestFile(paths.ready) }),
             digest.size == request.size, digest.md5 == request.md5.lowercased()
           {
+            telemetry?.ready(request.chunkID)
+            telemetry?.stored(request.size, device: device)
             return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: fileLock)
           }
           try await Task.sleep(for: .milliseconds(20))
@@ -124,6 +292,8 @@ actor DownloadCache {
         digest.size == request.size, digest.md5 == request.md5.lowercased()
       {
         try fileLock.makeShared()
+        telemetry?.ready(request.chunkID)
+        telemetry?.stored(request.size, device: device)
         return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: fileLock)
       }
     }
@@ -143,7 +313,9 @@ actor DownloadCache {
         try await Task.sleep(for: .milliseconds(100))
       }
     }
-    let context = try await runTransferIO { try DownloadContext(paths: paths, request: request) }
+    let context = try await runTransferIO {
+      try DownloadContext(paths: paths, request: request, telemetry: telemetry)
+    }
     defer { context.close() }
     var lastError: (any Error)?
 
@@ -160,7 +332,9 @@ actor DownloadCache {
             try await transferWhole(request, context: context)
           }
         }
-        let digest = try await runTransferIO { try digestFile(paths.partial) }
+        let digest = try await runTransferIO {
+          try digestFile(paths.partial, telemetry: telemetry, device: device)
+        }
         guard digest?.size == request.size, digest?.md5 == request.md5.lowercased() else {
           try await runTransferIO { try context.reset() }
           throw SophonClientError.InvalidChecksumError(
@@ -168,6 +342,7 @@ actor DownloadCache {
         }
         try await finish(context: context, paths: paths)
         try fileLock.makeShared()
+        telemetry?.ready(request.chunkID)
         return CachedDownload(fileURL: paths.ready, size: request.size, fileLock: fileLock)
       } catch {
         try Task.checkCancellation()
@@ -439,27 +614,42 @@ private final class DownloadContext: @unchecked Sendable {
     var wholeRequest: Bool?
   }
   private let lock = NSLock()
-  private let data: FileHandle
-  private let index: FileHandle
+  private let data: FileHandle?
+  private let index: FileHandle?
+  private let writer: CachedBinaryWriter?
+  private let telemetry: TransferTelemetry?
+  private let downloadID: String
+  private let device: String
   private let encoder = JSONEncoder()
   let size: UInt64
   private var prefixes: [UInt64]
   private var wholeRequest = false
   private var closed = false
 
-  init(paths: DownloadPaths, request: DownloadRequest) throws {
+  init(
+    paths: DownloadPaths, request: DownloadRequest, writer: CachedBinaryWriter? = nil,
+    telemetry: TransferTelemetry? = nil, progressID: String? = nil
+  ) throws {
     size = request.size
+    self.writer = writer
+    self.telemetry = telemetry
+    self.downloadID = progressID ?? request.chunkID
+    self.device = telemetry?.register(paths.partial, role: "Cache") ?? ""
     prefixes = Array(
       repeating: 0, count: Int(size / Self.blockSize + (size % Self.blockSize == 0 ? 0 : 1)))
-    data = try FileHandle(forUpdating: paths.partial)
-    if !FileManager.default.fileExists(atPath: paths.index.path) {
+    data = writer == nil ? try FileHandle(forUpdating: paths.partial) : nil
+    let journalsToDisk = writer == nil || writer?.inMemory == false
+    if journalsToDisk, !FileManager.default.fileExists(atPath: paths.index.path) {
       guard FileManager.default.createFile(atPath: paths.index.path, contents: nil) else {
-        try? data.close()
+        try? data?.close()
         throw SophonClientError.UnknownError("Cannot create download progress journal")
       }
     }
-    index = try FileHandle(forUpdating: paths.index)
-    let saved = try Data(contentsOf: paths.index)
+    index = journalsToDisk ? try FileHandle(forUpdating: paths.index) : nil
+    let saved: Data
+    do { saved = try Data(contentsOf: paths.index) } catch {
+      if isMissingFile(error) { saved = Data() } else { throw error }
+    }
     var validLength = 0
     for line in saved.split(separator: 10, omittingEmptySubsequences: false).dropLast() {
       let record = try JSONDecoder().decode(Record.self, from: Data(line))
@@ -472,8 +662,41 @@ private final class DownloadContext: @unchecked Sendable {
       if let whole = record.wholeRequest { wholeRequest = whole }
       validLength += line.count + 1
     }
-    try index.truncate(atOffset: UInt64(validLength))
-    try index.seekToEnd()
+    try index?.truncate(atOffset: UInt64(validLength))
+    try index?.seekToEnd()
+    if writer?.inMemory == false {
+      try writer?.restoreRanges(
+        prefixes.enumerated().compactMap { range, bytes in
+          guard bytes > 0 else { return nil }
+          let start = UInt64(range) * Self.blockSize
+          return start..<(start + bytes)
+        })
+    }
+  }
+
+  static func savedRanges(paths: DownloadPaths, size: UInt64) throws -> [Range<UInt64>] {
+    guard FileManager.default.fileExists(atPath: paths.partial.path) else { return [] }
+    let saved: Data
+    do { saved = try Data(contentsOf: paths.index) } catch {
+      if isMissingFile(error) { return [] }
+      throw error
+    }
+    let count = Int(size / blockSize + (size % blockSize == 0 ? 0 : 1))
+    var prefixes = Array(repeating: UInt64(0), count: count)
+    for line in saved.split(separator: 10, omittingEmptySubsequences: false).dropLast() {
+      let record = try JSONDecoder().decode(Record.self, from: Data(line))
+      if let range = record.range, let bytes = record.bytes {
+        guard prefixes.indices.contains(range),
+          bytes <= min(blockSize, size - UInt64(range) * blockSize)
+        else { throw SophonClientError.UnknownError("Invalid download progress journal") }
+        prefixes[range] = bytes
+      }
+    }
+    return prefixes.enumerated().compactMap { range, bytes in
+      guard bytes > 0 else { return nil }
+      let start = UInt64(range) * blockSize
+      return start..<(start + bytes)
+    }
   }
 
   var useWholeRequest: Bool { lock.withLock { wholeRequest } }
@@ -509,13 +732,22 @@ private final class DownloadContext: @unchecked Sendable {
         if writeFrom < next {
           let lower = Int(writeFrom - position)
           let upper = Int(next - position)
-          try data.seek(toOffset: writeFrom)
-          try data.write(contentsOf: bytes.subdata(in: lower..<upper))
+          let part = bytes.subdata(in: lower..<upper)
+          if let writer {
+            try writer.writeBlocking(part, at: writeFrom)
+          } else {
+            try data?.seek(toOffset: writeFrom)
+            try data?.write(contentsOf: part)
+            telemetry?.write(UInt64(part.count), device: device)
+            telemetry?.stored(UInt64(part.count), device: device)
+          }
           try append(Record(range: range, bytes: next - base))
           prefixes[range] = next - base
         }
         offset = next
       }
+      telemetry?.receive(
+        UInt64(bytes.count), committed: prefixes.reduce(0, +), id: downloadID)
     }
   }
 
@@ -529,19 +761,24 @@ private final class DownloadContext: @unchecked Sendable {
   func reset() throws {
     try lock.withLock {
       // Keep the reservation visible to other processes; all prefixes restart at zero.
-      try data.truncate(atOffset: size)
-      try index.truncate(atOffset: 0)
-      try index.seek(toOffset: 0)
+      try data?.truncate(atOffset: size)
+      try index?.truncate(atOffset: 0)
+      try index?.seek(toOffset: 0)
       prefixes = Array(repeating: 0, count: prefixes.count)
       if wholeRequest { try append(Record(wholeRequest: true)) }
+      telemetry?.resetDownload(downloadID)
     }
   }
 
   private func append(_ record: Record) throws {
+    guard let index else { return }
     var bytes = try encoder.encode(record)
     bytes.append(10)
     let offset = try index.offset()
-    do { try index.write(contentsOf: bytes) } catch {
+    do {
+      try index.write(contentsOf: bytes)
+      telemetry?.write(UInt64(bytes.count), device: device)
+    } catch {
       try? index.truncate(atOffset: offset)
       try? index.seek(toOffset: offset)
       throw error
@@ -552,8 +789,8 @@ private final class DownloadContext: @unchecked Sendable {
     lock.withLock {
       if closed { return }
       closed = true
-      try? data.close()
-      try? index.close()
+      try? data?.close()
+      try? index?.close()
     }
   }
 

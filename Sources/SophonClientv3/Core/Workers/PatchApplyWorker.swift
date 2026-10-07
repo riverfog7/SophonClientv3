@@ -8,12 +8,25 @@ struct PatchApplyRequest: Sendable {
   let target: PlannedUpdateFile
   let outputURL: URL
   var synchronize = false
+  var telemetry: TransferTelemetry? = nil
 }
 
 enum PatchInput: Sendable {
   case cached(CachedBinary)
   case file(URL, offset: UInt64, size: UInt64)
   case download(CachedDownload, offset: UInt64, size: UInt64)
+
+  func slice(offset: UInt64, size: UInt64) throws -> PatchInput {
+    switch self {
+    case .cached(let binary): return .cached(try binary.slice(offset: offset, length: size))
+    case .file(let url, let base, let length):
+      guard offset <= length, size <= length - offset else { throw BinaryCacheError.outOfBounds }
+      return .file(url, offset: base + offset, size: size)
+    case .download(let payload, let base, let length):
+      guard offset <= length, size <= length - offset else { throw BinaryCacheError.outOfBounds }
+      return .download(payload, offset: base + offset, size: size)
+    }
+  }
 
   func isHDiff() throws -> Bool {
     let source = try open()
@@ -65,7 +78,8 @@ final class PatchApplyWorker: Sendable {
     }
 
     let output = try HashedPatchOutput(
-      fileURL: request.outputURL, size: request.target.size, md5: request.target.md5)
+      fileURL: request.outputURL, size: request.target.size, md5: request.target.md5,
+      telemetry: request.telemetry)
     defer { try? output.handle.close() }
 
     if isHDiff {
@@ -152,10 +166,16 @@ private final class HashedPatchOutput: HPatchSink, @unchecked Sendable {
   private var hasher = Insecure.MD5()
   private var written: UInt64 = 0
   private var prepared = false
+  private let telemetry: TransferTelemetry?
+  private let device: String
 
-  init(fileURL: URL, size: UInt64, md5: String) throws {
+  init(
+    fileURL: URL, size: UInt64, md5: String, telemetry: TransferTelemetry?
+  ) throws {
     expectedSize = size
     expectedMD5 = md5.lowercased()
+    self.telemetry = telemetry
+    self.device = telemetry?.register(fileURL, role: "Target") ?? ""
     try FileManager.default.createDirectory(
       at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
     if !FileManager.default.fileExists(atPath: fileURL.path) {
@@ -190,6 +210,7 @@ private final class HashedPatchOutput: HPatchSink, @unchecked Sendable {
         throw SophonClientError.UnknownError("Patch output exceeds the target size")
       }
       try handle.write(contentsOf: Data(bytes))
+      telemetry?.write(UInt64(bytes.count), device: device)
       hasher.update(bufferPointer: bytes)
       written += UInt64(bytes.count)
     }

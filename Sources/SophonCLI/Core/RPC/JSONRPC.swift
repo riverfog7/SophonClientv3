@@ -104,7 +104,8 @@ private struct RPCOperationParameters: Decodable, Sendable {
     transfer =
       try values.decodeIfPresent(TransferSettings.self, forKey: .transfer) ?? TransferSettings()
     guard ["full", "base"].contains(mode), downloads > 0, writes > 0,
-      transfer.entryLimit > 0, transfer.diskLimit > 0, !directory.isEmpty
+      transfer.entryLimit > 0, !transfer.diskCacheEnabled || transfer.diskLimit > 0,
+      !directory.isEmpty
     else {
       throw RPCFailure(code: -32602, message: "Invalid scenario or worker/cache count")
     }

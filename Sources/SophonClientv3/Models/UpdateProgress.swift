@@ -23,6 +23,8 @@ public enum UpdateEvent: Sendable {
     sourceVersion: String, targetVersion: String, patchBytes: UInt64, installBytes: UInt64,
     totalFiles: Int, deleteFiles: Int, deleteBytes: UInt64)
   case bundleDownloaded(patchID: String, bytes: UInt64)
+  case patchDownloadsPlanned(bytes: UInt64)
+  case resourcesUpdated(TransferResourceProgress)
   case fileStarted(fileURL: URL)
   case repairPlanned(downloadBytes: UInt64, writeBytes: UInt64)
   case repairDownloaded(bytes: UInt64)
@@ -57,4 +59,9 @@ public struct UpdateProgress: BaseProgress, Codable {
   public internal(set) var totalRepairWriteBytes: UInt64 = 0
   public internal(set) var repairDownloadedBytes: UInt64 = 0
   public internal(set) var repairWrittenBytes: UInt64 = 0
+  public internal(set) var receivedPatchBytes: UInt64 = 0
+  public internal(set) var retainedPatchBytes: UInt64 = 0
+  public internal(set) var transferredPatchBytes: UInt64 = 0
+  public internal(set) var remainingPatchBytes: UInt64 = 0
+  public internal(set) var resources: TransferResourceProgress?
 }

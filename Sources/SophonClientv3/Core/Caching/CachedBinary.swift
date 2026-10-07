@@ -1,3 +1,4 @@
+import Crypto
 // TODO: Un-vibecode this
 import Foundation
 
@@ -5,23 +6,27 @@ private let cachedBinaryIOQueue = DispatchQueue(
   label: "sophon.binary-cache.io", qos: .utility, attributes: .concurrent
 )
 
-private func cleanupCachedBinaryFile(at fileURL: URL, reservation: BinaryCache.Reservation) {
+private func cleanupCachedBinaryFile(
+  at fileURL: URL, reservation: BinaryCache.Reservation, storedBytes: UInt64
+) {
   cachedBinaryIOQueue.async {
     withExtendedLifetime(reservation) {
       do {
         try FileManager.default.removeItem(at: fileURL)
+        reservation.telemetry?.removed(storedBytes, device: reservation.device)
       } catch {
         let nsError = error as NSError
         if nsError.domain == NSCocoaErrorDomain,
           nsError.code == CocoaError.Code.fileNoSuchFile.rawValue
             || nsError.code == CocoaError.Code.fileReadNoSuchFile.rawValue
         {
+          reservation.telemetry?.removed(storedBytes, device: reservation.device)
           return
         }
 
         // Keep the bytes and entry slot charged until the file is removed.
         cachedBinaryIOQueue.asyncAfter(deadline: .now() + 5) {
-          cleanupCachedBinaryFile(at: fileURL, reservation: reservation)
+          cleanupCachedBinaryFile(at: fileURL, reservation: reservation, storedBytes: storedBytes)
         }
       }
     }
@@ -53,25 +58,34 @@ private final class CachedBinaryStorage: @unchecked Sendable {
   let reservation: BinaryCache.Reservation
   var fileURL: URL?
   var data: Data?
+  let preserveFile: Bool
+  var storedBytes: UInt64 = 0
 
-  init(reservation: BinaryCache.Reservation, directory: URL) throws {
+  init(
+    reservation: BinaryCache.Reservation, directory: URL, fileURL: URL?, preserveFile: Bool
+  ) throws {
     self.reservation = reservation
+    self.preserveFile = preserveFile
     if reservation.inMemory {
       self.fileURL = nil
       self.data = Data(count: Int(reservation.size))
     } else {
       self.data = nil
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      let fileURL = directory.appendingPathComponent("sophon-\(UUID().uuidString).tmp")
-      try Data().write(to: fileURL, options: .withoutOverwriting)
-      self.fileURL = fileURL
+      let target = fileURL ?? directory.appendingPathComponent("sophon-\(UUID().uuidString).tmp")
+      try FileManager.default.createDirectory(
+        at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+      if !FileManager.default.fileExists(atPath: target.path) {
+        try Data().write(to: target, options: .withoutOverwriting)
+      }
+      self.fileURL = target
     }
   }
 
   deinit {
     data = nil
-    guard let fileURL else { return }
-    cleanupCachedBinaryFile(at: fileURL, reservation: reservation)
+    guard let fileURL, !preserveFile else { return }
+    cleanupCachedBinaryFile(at: fileURL, reservation: reservation, storedBytes: storedBytes)
   }
 }
 
@@ -88,10 +102,13 @@ final class CachedBinaryWriter: @unchecked Sendable {
   }
 
   internal static func make(
-    reservation: BinaryCache.Reservation, directory: URL
+    reservation: BinaryCache.Reservation, directory: URL, fileURL: URL? = nil,
+    preserveFile: Bool = false
   ) async throws -> CachedBinaryWriter {
     try await performCacheIO {
-      let storage = try CachedBinaryStorage(reservation: reservation, directory: directory)
+      let storage = try CachedBinaryStorage(
+        reservation: reservation, directory: directory, fileURL: fileURL, preserveFile: preserveFile
+      )
       let handle = try storage.fileURL.map { try FileHandle(forUpdating: $0) }
       return CachedBinaryWriter(storage: storage, handle: handle)
     }
@@ -108,24 +125,58 @@ final class CachedBinaryWriter: @unchecked Sendable {
   }
 
   internal func write(_ data: Data, at offset: UInt64) async throws {
-    try await run { writer in
-      guard let storage = writer.storage else { throw BinaryCacheError.closed }
-      let length = UInt64(data.count)
-      try checkBinaryRange(offset: offset, length: length, size: storage.reservation.size)
-      guard !data.isEmpty else { return }
+    try await run { try $0.writeBytes(data, at: offset) }
+  }
 
-      do {
-        if let handle = writer.handle {
-          try handle.seek(toOffset: offset)
-          try handle.write(contentsOf: data)
-        } else {
-          storage.data?.replaceSubrange(Int(offset)..<Int(offset + length), with: data)
-        }
-      } catch {
-        try? writer.discard()
-        throw error
+  // URLSession's delegate needs a bounded synchronous sink, rather than a task per received packet.
+  internal func writeBlocking(_ data: Data, at offset: UInt64) throws {
+    try ioQueue.sync { try writeBytes(data, at: offset) }
+  }
+
+  private func writeBytes(_ data: Data, at offset: UInt64) throws {
+    let writer = self
+    guard let storage = writer.storage else { throw BinaryCacheError.closed }
+    let length = UInt64(data.count)
+    try checkBinaryRange(offset: offset, length: length, size: storage.reservation.size)
+    guard !data.isEmpty else { return }
+
+    do {
+      if let handle = writer.handle {
+        try handle.seek(toOffset: offset)
+        try handle.write(contentsOf: data)
+        storage.reservation.telemetry?.write(length, device: storage.reservation.device)
+      } else {
+        storage.data?.replaceSubrange(Int(offset)..<Int(offset + length), with: data)
       }
-      writer.recordRange(offset..<(offset + length))
+    } catch {
+      try? writer.discard()
+      throw error
+    }
+    writer.recordRange(offset..<(offset + length))
+  }
+
+  internal var inMemory: Bool { ioQueue.sync { storage?.reservation.inMemory ?? false } }
+
+  internal func restoreRanges(_ ranges: [Range<UInt64>]) throws {
+    try ioQueue.sync {
+      guard storage != nil else { throw BinaryCacheError.closed }
+      for range in ranges { recordRange(range) }
+    }
+  }
+
+  internal func preview() throws -> CachedBinary {
+    try ioQueue.sync {
+      guard let storage else { throw BinaryCacheError.closed }
+      return CachedBinary(storage: storage, offset: 0, size: storage.reservation.size)
+    }
+  }
+
+  internal func pause() {
+    ioQueue.sync {
+      try? handle?.close()
+      handle = nil
+      storage = nil
+      writtenRanges.removeAll()
     }
   }
 
@@ -178,7 +229,11 @@ final class CachedBinaryWriter: @unchecked Sendable {
     }
     try handle?.close()
     if let fileURL = storage?.fileURL {
-      try FileManager.default.removeItem(at: fileURL)
+      try removeOwnedFile(fileURL)
+      if let storage {
+        storage.reservation.telemetry?.removed(
+          storage.storedBytes, device: storage.reservation.device)
+      }
       storage?.fileURL = nil
     }
   }
@@ -194,6 +249,14 @@ final class CachedBinaryWriter: @unchecked Sendable {
       last += 1
     }
     writtenRanges.replaceSubrange(first..<last, with: [lower..<upper])
+    if let storage, !storage.reservation.inMemory {
+      let total = writtenRanges.reduce(UInt64(0)) { $0 + $1.upperBound - $1.lowerBound }
+      if total > storage.storedBytes {
+        storage.reservation.telemetry?.stored(
+          total - storage.storedBytes, device: storage.reservation.device)
+        storage.storedBytes = total
+      }
+    }
   }
 }
 
@@ -201,6 +264,35 @@ struct CachedBinary: Sendable {
   fileprivate let storage: CachedBinaryStorage
   fileprivate let offset: UInt64
   let size: UInt64
+
+  internal var inMemory: Bool { storage.reservation.inMemory }
+
+  internal func removeFile() throws {
+    guard let fileURL = storage.fileURL else { return }
+    try removeOwnedFile(fileURL)
+    storage.fileURL = nil
+    storage.reservation.telemetry?.removed(
+      storage.storedBytes, device: storage.reservation.device)
+    storage.storedBytes = 0
+  }
+
+  internal func data() throws -> Data {
+    if let data = storage.data, offset == 0, size == UInt64(data.count) { return data }
+    return try makeReader().read(at: 0, count: Int(size))
+  }
+
+  internal func checksum() throws -> String {
+    if let data = storage.data, offset == 0, size == UInt64(data.count) { return md5Hex(data) }
+    let reader = try makeReader()
+    var hasher = Insecure.MD5()
+    var position: UInt64 = 0
+    while position < size {
+      let data = try reader.read(at: position, count: Int(min(1024 * 1024, size - position)))
+      hasher.update(data: data)
+      position += UInt64(data.count)
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+  }
 
   internal func slice(offset: UInt64, length: UInt64) throws -> CachedBinary {
     try checkBinaryRange(offset: offset, length: length, size: size)
@@ -258,6 +350,8 @@ final class CachedBinaryReader: @unchecked Sendable {
         throw BinaryCacheError.unexpectedEndOfFile
       }
       data.append(part)
+      binary.storage.reservation.telemetry?.read(
+        UInt64(part.count), device: binary.storage.reservation.device)
     }
     return data
   }

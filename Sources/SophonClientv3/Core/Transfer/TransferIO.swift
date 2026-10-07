@@ -61,7 +61,9 @@ struct FileDigest: Sendable {
   let md5: String
 }
 
-func digestFile(_ fileURL: URL) throws -> FileDigest? {
+func digestFile(
+  _ fileURL: URL, telemetry: TransferTelemetry? = nil, device: String? = nil
+) throws -> FileDigest? {
   let handle: FileHandle
   do { handle = try FileHandle(forReadingFrom: fileURL) } catch {
     if isMissingFile(error) { return nil }
@@ -71,9 +73,11 @@ func digestFile(_ fileURL: URL) throws -> FileDigest? {
 
   var hasher = Insecure.MD5()
   var size: UInt64 = 0
+  let activeDevice = device ?? telemetry?.register(fileURL, role: "Target") ?? ""
   while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
     hasher.update(data: data)
     size += UInt64(data.count)
+    telemetry?.read(UInt64(data.count), device: activeDevice)
   }
   return FileDigest(
     size: size, md5: hasher.finalize().map { String(format: "%02x", $0) }.joined())

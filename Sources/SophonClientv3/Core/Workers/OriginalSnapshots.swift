@@ -10,26 +10,26 @@ struct OriginalSnapshot: Sendable {
 actor OriginalSnapshots {
   private let cache: BinaryCache
   private let directory: URL
-  private let diskLimit: UInt64
   private let io: WorkLimiter
   private let targets: [URL: PlannedUpdateFile]
   private let durableSources: Set<URL>
   private let sharedSources: Set<URL>
   private let cacheOnly: Bool
+  private let telemetry: TransferTelemetry?
   private var references: [String: Int]
   private var tasks: [String: Task<OriginalSnapshot, any Error>] = [:]
   private var diskSizes: [String: UInt64]
 
   init(
-    cache: BinaryCache, directory: URL, diskLimit: UInt64, io: WorkLimiter,
+    cache: BinaryCache, directory: URL, io: WorkLimiter,
     plan: UpdatePlan, writeMode: UpdateWriteMode, existingSizes: [String: UInt64],
-    cacheOnly: Bool = false
+    cacheOnly: Bool = false, telemetry: TransferTelemetry? = nil, diskCacheEnabled: Bool = true
   ) {
     self.cache = cache
     self.directory = directory
-    self.diskLimit = diskLimit
     self.io = io
     self.cacheOnly = cacheOnly
+    self.telemetry = telemetry
     targets = Dictionary(uniqueKeysWithValues: plan.installFiles.map { ($0.fileURL, $0) })
     let patches = plan.patchBundles.flatMap(\.patches)
     let targetPaths = Set(plan.installFiles.map(\.fileURL))
@@ -42,7 +42,7 @@ actor OriginalSnapshots {
       })
     durableSources = Set(
       patches.compactMap { patch in
-        guard !cacheOnly, let original = patch.original else { return nil }
+        guard !cacheOnly, diskCacheEnabled, let original = patch.original else { return nil }
         if writeMode == .inPlace
           || (targetPaths.contains(original.fileURL) && original.fileURL != patch.target.fileURL)
         {
@@ -58,7 +58,7 @@ actor OriginalSnapshots {
   }
 
   static func existingSizes(directory: URL) throws -> [String: UInt64] {
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    guard FileManager.default.fileExists(atPath: directory.path) else { return [:] }
     var result: [String: UInt64] = [:]
     for file in try FileManager.default.contentsOfDirectory(
       at: directory, includingPropertiesForKeys: [.fileSizeKey])
@@ -84,32 +84,37 @@ actor OriginalSnapshots {
     let key = Self.key(source)
     if let task = tasks[key] { return try await task.value }
     let durable = !cacheOnly && (durableSources.contains(source.fileURL) || diskSizes[key] != nil)
-    if durable {
-      let used = diskSizes.values.reduce(UInt64(0), +)
-      let extra =
-        source.size > diskSizes[key, default: 0] ? source.size - diskSizes[key, default: 0] : 0
-      guard extra <= diskLimit, used <= diskLimit - extra else {
-        throw SophonClientError.UnknownError(
-          "The original-file cache limit is too small for this update")
-      }
-      diskSizes[key] = max(source.size, diskSizes[key, default: 0])
-    }
+    if durable { diskSizes[key] = source.size }
     let savedURL = directory.appendingPathComponent(key + ".original")
     let candidate = targets[source.fileURL]
-    let task = Task { [cache, io, cacheOnly] in
-      if durable, let digest = try await runTransferIO({ try digestFile(savedURL) }),
+    let task = Task { [cache, io, cacheOnly, telemetry] in
+      if durable,
+        let digest = try await io.withPermit({
+          try await runTransferIO {
+            try digestFile(
+              savedURL, telemetry: telemetry,
+              device: telemetry?.register(savedURL, role: "Recovery"))
+          }
+        }),
         digest.size == source.size, digest.md5 == source.md5.lowercased()
       {
+        let writer = try await cache.makeWriter(
+          expectedSize: source.size, fileURL: savedURL, forceDisk: true, preserveFile: true)
+        try writer.restoreRanges([0..<source.size])
         return OriginalSnapshot(
-          input: .file(savedURL, offset: 0, size: source.size), observed: digest,
-          fromSavedOriginal: true)
+          input: .cached(try await writer.finish()), observed: digest, fromSavedOriginal: true)
       }
+      if durable { try await runTransferIO { try removeOwnedFile(savedURL) } }
       let writer =
-        durable || cacheOnly ? nil : try await cache.makeWriter(expectedSize: source.size)
+        cacheOnly
+        ? nil
+        : try await cache.makeWriter(
+          expectedSize: source.size, fileURL: durable ? savedURL : nil,
+          forceDisk: durable, preserveFile: durable)
       do {
         let digest = try await io.withPermit {
           try await Self.capture(
-            source, candidate: candidate, writer: writer, savedURL: durable ? savedURL : nil)
+            source, candidate: candidate, writer: writer, telemetry: telemetry)
         }
         if digest?.size == source.size, digest?.md5 == source.md5.lowercased() {
           let input: PatchInput?
@@ -118,7 +123,7 @@ actor OriginalSnapshots {
           } else if let writer {
             input = .cached(try await writer.finish())
           } else {
-            input = .file(savedURL, offset: 0, size: source.size)
+            input = nil
           }
           return OriginalSnapshot(input: input, observed: digest, fromSavedOriginal: false)
         }
@@ -140,7 +145,7 @@ actor OriginalSnapshots {
 
   private static func capture(
     _ source: PlannedPatchSource, candidate: PlannedUpdateFile?, writer: CachedBinaryWriter?,
-    savedURL: URL?
+    telemetry: TransferTelemetry?
   ) async throws -> FileDigest? {
     let opened: (FileHandle, UInt64)? = try await runTransferIO {
       let handle: FileHandle
@@ -155,33 +160,20 @@ actor OriginalSnapshots {
     guard size == source.size || size == candidate?.size else {
       return FileDigest(size: size, md5: "")
     }
-    let output: FileHandle? = try await runTransferIO {
-      try handle.seek(toOffset: 0)
-      guard size == source.size, let savedURL else { return nil }
-      try FileManager.default.createDirectory(
-        at: savedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-      guard FileManager.default.createFile(atPath: savedURL.path, contents: nil) else {
-        throw SophonClientError.UnknownError("Cannot create original snapshot: \(savedURL.path)")
-      }
-      return try FileHandle(forWritingTo: savedURL)
-    }
-    defer { transferIOQueue.async { try? output?.close() } }
+    try await runTransferIO { try handle.seek(toOffset: 0) }
     var hasher = Insecure.MD5()
     var offset: UInt64 = 0
+    let device = telemetry?.register(source.fileURL, role: "Target") ?? ""
     while let data = try await runTransferIO({ try handle.read(upToCount: 1024 * 1024) }),
       !data.isEmpty
     {
       hasher.update(data: data)
+      telemetry?.read(UInt64(data.count), device: device)
       if size == source.size {
-        if let output {
-          try await runTransferIO { try output.write(contentsOf: data) }
-        } else {
-          try await writer?.write(data, at: offset)
-        }
+        try await writer?.write(data, at: offset)
       }
       offset += UInt64(data.count)
     }
-    try await runTransferIO(checkCancellation: false) { try output?.close() }
     return FileDigest(
       size: offset, md5: hasher.finalize().map { String(format: "%02x", $0) }.joined())
   }
@@ -190,7 +182,11 @@ actor OriginalSnapshots {
     let key = Self.key(source)
     references[key, default: 1] -= 1
     guard references[key] == 0 else { return }
-    tasks.removeValue(forKey: key)
+    if let task = tasks.removeValue(forKey: key),
+      let snapshot = try? await task.value, case .cached(let binary)? = snapshot.input
+    {
+      try await runTransferIO(checkCancellation: false) { try binary.removeFile() }
+    }
     if !cacheOnly, diskSizes[key] != nil {
       let fileURL = directory.appendingPathComponent(key + ".original")
       try await runTransferIO(checkCancellation: false) { try removeOwnedFile(fileURL) }
@@ -199,4 +195,14 @@ actor OriginalSnapshots {
   }
 
   func cancel() { for task in tasks.values { task.cancel() } }
+
+  func requiresDisk(_ source: PlannedPatchSource) -> Bool {
+    durableSources.contains(source.fileURL) || diskSizes[Self.key(source)] != nil
+  }
+
+  func close() async {
+    for task in tasks.values { task.cancel() }
+    for task in tasks.values { _ = try? await task.value }
+    tasks.removeAll()
+  }
 }

@@ -13,7 +13,7 @@ final class ChunkWriteCoordinator: Sendable {
     workerCount: Int,
     maxCachedFileHandles: Int = 512,
     reporter: InstallationReporter? = nil,
-    journal: InstallationJournal? = nil
+    journal: InstallationJournal? = nil, telemetry: TransferTelemetry? = nil
   ) throws {
     guard workerCount > 0 else {
       throw SophonClientError.UnknownError(
@@ -26,7 +26,8 @@ final class ChunkWriteCoordinator: Sendable {
       )
     }
     self.workers = try (0..<workerCount).map {
-      try ChunkWriteWorker(index: $0, maxCachedFileHandles: maxCachedFileHandles / workerCount)
+      try ChunkWriteWorker(
+        index: $0, maxCachedFileHandles: maxCachedFileHandles / workerCount, telemetry: telemetry)
     }
     var loads = Array(repeating: UInt64(0), count: workerCount)
     var fileWorkers: [URL: Int] = [:]
@@ -52,12 +53,15 @@ final class ChunkWriteCoordinator: Sendable {
       try Task.checkCancellation()
 
       let worker = try worker(for: application.fileURL)
-      try await worker.run(
-        ChunkWriteRequest(
-          data: chunk.data,
-          applicationInfo: application
-        )
-      )
+      var offset: UInt64 = 0
+      for try await data in try chunk.data.stream() {
+        try await worker.run(
+          ChunkWriteRequest(
+            data: data,
+            applicationInfo: ChunkApplicationInfo(
+              fileURL: application.fileURL, offset: application.offset + offset)))
+        offset += UInt64(data.count)
+      }
       if let journal {
         try await runTransferIO(checkCancellation: false) {
           try journal.written(chunkID: chunk.chunkID, application: application)
@@ -66,7 +70,7 @@ final class ChunkWriteCoordinator: Sendable {
       await reporter?.record(
         .chunkWritten(
           filePath: application.fileURL, chunkID: chunk.chunkID,
-          offset: application.offset, bytes: UInt64(chunk.data.count)))
+          offset: application.offset, bytes: chunk.data.size))
 
       if let completedFile = try await tracker.completeWrite(
         to: application.fileURL
@@ -75,6 +79,7 @@ final class ChunkWriteCoordinator: Sendable {
         await reporter?.record(.fileCompleted(filePath: completedFile.fileURL))
       }
     }
+    try await chunk.workspace.consumed(chunk.data, request: chunk.request)
   }
 
   internal func ensureComplete() async throws {

@@ -11,12 +11,15 @@ final class ChunkWriteWorker: @unchecked Sendable {
   private let maxCachedFileHandles: Int
   private var accessCounter: UInt64 = 0
   private var handles: [URL: CachedHandle] = [:]
+  private let telemetry: TransferTelemetry?
+  private var devices: [URL: String] = [:]
 
-  init(index: Int, maxCachedFileHandles: Int) throws {
+  init(index: Int, maxCachedFileHandles: Int, telemetry: TransferTelemetry? = nil) throws {
     guard maxCachedFileHandles > 0 else {
       throw SophonClientError.UnknownError("File handle cache capacity must be positive")
     }
     self.maxCachedFileHandles = maxCachedFileHandles
+    self.telemetry = telemetry
     self.ioQueue = DispatchQueue(
       label: "sophon.chunk-write.\(index)",
       qos: .utility
@@ -118,6 +121,9 @@ final class ChunkWriteWorker: @unchecked Sendable {
     do {
       try handle.seek(toOffset: application.offset)
       try handle.write(contentsOf: request.data)
+      let device = devices[fileURL] ?? telemetry?.register(fileURL, role: "Target") ?? ""
+      devices[fileURL] = device
+      telemetry?.write(UInt64(request.data.count), device: device)
     } catch {
       if let cached = handles.removeValue(forKey: fileURL) {
         try? cached.handle.close()

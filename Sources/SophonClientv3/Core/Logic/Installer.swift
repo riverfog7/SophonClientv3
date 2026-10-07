@@ -17,12 +17,14 @@ final class Installer: Sendable {
   let maxCocurrentPostProcessors: Int
   let maxCocurrentWrites: Int
   let maxCachedFileHandles: Int
+  let transferSettings: TransferSettings
 
   internal init(
     baseGameDir: URL, maxCocurrentChecks: Int, maxCocurrentDownloads: Int,
     maxCocurrentPostProcessors: Int, maxCocurrentWrites: Int, session: URLSession = .shared,
     maxRetries: Int = 10,
-    retryInterval: Int = 5, maxCachedFileHandles: Int = 512, downloadCache: DownloadCache? = nil
+    retryInterval: Int = 5, maxCachedFileHandles: Int = 512, downloadCache: DownloadCache? = nil,
+    transferSettings: TransferSettings = TransferSettings()
   ) throws {
     self.baseGameDir = baseGameDir
     self.checker = ChunkCheckWorker(baseGameDir: self.baseGameDir)
@@ -35,6 +37,7 @@ final class Installer: Sendable {
     self.maxCocurrentPostProcessors = maxCocurrentPostProcessors
     self.maxCocurrentWrites = maxCocurrentWrites
     self.maxCachedFileHandles = maxCachedFileHandles
+    self.transferSettings = transferSettings
     guard maxCocurrentChecks > 0 else {
       throw SophonClientError.UnknownError("MaxCocurrentChecks should be a positive integer")
     }
@@ -319,8 +322,25 @@ final class Installer: Sendable {
     _ plan: InstallationPlan,
     reporter: InstallationReporter? = nil,
     journal: InstallationJournal? = nil,
-    serializedWrites: Bool = false
+    serializedWrites: Bool = false,
+    workspace providedWorkspace: TransferWorkspace? = nil
   ) async throws {
+    let workspace: TransferWorkspace
+    if let providedWorkspace {
+      workspace = providedWorkspace
+    } else {
+      let transport =
+        downloader.cache
+        ?? DownloadCache(
+          directory: transferSettings.cacheURL.appendingPathComponent("working"),
+          diskLimit: transferSettings.diskLimit,
+          maxConcurrentDownloads: maxCocurrentDownloads,
+          maxRetries: downloader.maxRetries, retryInterval: downloader.retryInterval,
+          configuration: downloader.session.configuration)
+      workspace = try await TransferWorkspace(
+        settings: transferSettings, gameDirectory: baseGameDir, operation: "install",
+        transport: transport)
+    }
     await reporter?.record(.phaseChanged(.running))
     let requiredChunks = AsyncChannel<RequiredChunk>()
     let downloadedChunks = AsyncChannel<DownloadedChunk>()
@@ -330,7 +350,7 @@ final class Installer: Sendable {
       plannedFiles: plan.plannedFiles,
       workerCount: serializedWrites ? 1 : maxCocurrentWrites,
       maxCachedFileHandles: maxCachedFileHandles,
-      reporter: reporter, journal: journal
+      reporter: reporter, journal: journal, telemetry: workspace.telemetry
     )
 
     do {
@@ -352,7 +372,7 @@ final class Installer: Sendable {
             input: requiredChunks,
             output: downloadedChunks
           ) { [self] chunk in
-            try await download(chunk, reporter: reporter)
+            try await download(chunk, reporter: reporter, workspace: workspace)
           }
         }
 
@@ -362,11 +382,11 @@ final class Installer: Sendable {
             input: downloadedChunks,
             output: processedChunks
           ) { [self] chunk in
-            let processed = try postProcessChunk(chunk)
+            let processed = try await postProcessChunk(chunk, workspace: workspace)
             await reporter?.record(
               .chunkPostProcessed(
-                chunkID: chunk.chunkID, compressed_bytes: UInt64(chunk.data.count),
-                uncompressed_bytes: UInt64(processed.data.count)))
+                chunkID: chunk.chunkID, compressed_bytes: chunk.data.size,
+                uncompressed_bytes: processed.data.size))
             return processed
           }
         }
@@ -390,19 +410,22 @@ final class Installer: Sendable {
 
       try Task.checkCancellation()
       try await writeCoordinator.ensureComplete()
+      if providedWorkspace == nil { try await workspace.finish(completed: true) }
     } catch {
       requiredChunks.finish()
       downloadedChunks.finish()
       processedChunks.finish()
 
       await writeCoordinator.closeAll()
+      if providedWorkspace == nil { try? await workspace.finish(completed: false) }
       throw error
     }
   }
 
   private func download(
     _ chunk: RequiredChunk,
-    reporter: InstallationReporter?
+    reporter: InstallationReporter?,
+    workspace: TransferWorkspace
   ) async throws -> DownloadedChunk {
     guard !chunk.downloadInfo.encryption,
       chunk.downloadInfo.password.isEmpty
@@ -415,26 +438,47 @@ final class Installer: Sendable {
     let downloadURL = try chunk.getDownloadURL()
     let md5 = chunk.downloadInfo.compression ? chunk.compressedMd5 : chunk.uncompressedMd5
     let size = chunk.downloadInfo.compression ? chunk.compressedSize : chunk.uncompressedSize
-    let data = try await downloader.run(
-      DownloadRequest(chunkID: chunk.chunkID, url: downloadURL, md5: md5, size: size),
-      reporter: reporter)
+    let request = DownloadRequest(chunkID: chunk.chunkID, url: downloadURL, md5: md5, size: size)
+    let headroom = chunk.downloadInfo.compression ? chunk.uncompressedSize : 0
+    let data = try await workspace.download(
+      request,
+      purpose: .download(
+        memoryHeadroom: headroom <= workspace.settings.memoryLimit ? headroom : 0,
+        diskHeadroom: headroom > workspace.settings.memoryLimit ? headroom : 0),
+      category: "install")
+    await reporter?.record(.chunkDownloaded(chunkID: chunk.chunkID, bytes: data.size))
 
     return DownloadedChunk(
       chunkID: chunk.chunkID, md5: chunk.uncompressedMd5, size: chunk.uncompressedSize, data: data,
-      downloadInfo: chunk.downloadInfo,
+      request: request, downloadInfo: chunk.downloadInfo,
       chunkApplicationInfos: chunk.chunkApplicationInfos)
   }
 
-  private func postProcessChunk(_ chunk: DownloadedChunk) throws -> ProcessedChunk {
+  private func postProcessChunk(
+    _ chunk: DownloadedChunk, workspace: TransferWorkspace
+  ) async throws -> ProcessedChunk {
     if !chunk.downloadInfo.compression {
       return ProcessedChunk(
-        chunkID: chunk.chunkID, data: chunk.data, chunkApplicationInfos: chunk.chunkApplicationInfos
+        chunkID: chunk.chunkID, data: chunk.data, request: chunk.request,
+        workspace: workspace, chunkApplicationInfos: chunk.chunkApplicationInfos
       )
     }
 
-    let data = try postProcessor.run(
-      ChunkPostProcessRequest(size: chunk.size, md5: chunk.md5, data: chunk.data))
-    return ProcessedChunk(
-      chunkID: chunk.chunkID, data: data, chunkApplicationInfos: chunk.chunkApplicationInfos)
+    let writer = try await workspace.cache.makeWriter(expectedSize: chunk.size)
+    do {
+      let data = try await runTransferIO {
+        try self.postProcessor.run(
+          ChunkPostProcessRequest(size: chunk.size, md5: chunk.md5, data: chunk.data.data()))
+      }
+      try await writer.write(data, at: 0)
+      let binary = try await writer.finish()
+      try await workspace.consumed(chunk.data, request: chunk.request)
+      return ProcessedChunk(
+        chunkID: chunk.chunkID, data: binary, request: chunk.request,
+        workspace: workspace, chunkApplicationInfos: chunk.chunkApplicationInfos)
+    } catch {
+      try? await writer.abort()
+      throw error
+    }
   }
 }

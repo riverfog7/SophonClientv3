@@ -16,7 +16,21 @@ extension Updater {
       installer: installer, downloadWorkers: maxCocurrentDownloads,
       writeWorkers: maxCocurrentWrites, reporter: reporter, cacheOnly: cacheOnly,
       gameID: gameID, mode: mode, predownload: predownload)
-    try await execution.run()
+    let sampling = Task {
+      while !Task.isCancelled {
+        await reporter.record(.resourcesUpdated(execution.workspace.telemetry.snapshot()))
+        do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+      }
+    }
+    do {
+      try await execution.run()
+      sampling.cancel()
+      await sampling.value
+    } catch {
+      sampling.cancel()
+      await sampling.value
+      throw error
+    }
   }
 
 }
@@ -35,7 +49,35 @@ extension PlannedPatchBundle {
 
 private struct ReadyPatch: Sendable {
   let patch: PlannedPatch
-  let bundle: CachedDownload
+  let bundle: PatchPayload
+}
+
+private final class PatchPayload: @unchecked Sendable {
+  let input: PatchInput
+  let request: DownloadRequest
+  private let workspace: TransferWorkspace?
+  private let lock = NSLock()
+  private var consumers: Int
+
+  init(
+    input: PatchInput, request: DownloadRequest, consumers: Int,
+    workspace: TransferWorkspace? = nil
+  ) {
+    self.input = input
+    self.request = request
+    self.consumers = consumers
+    self.workspace = workspace
+  }
+
+  func consumed() async throws {
+    let finished = lock.withLock {
+      consumers -= 1
+      return consumers == 0
+    }
+    if finished, let workspace, case .cached(let binary) = input {
+      try await workspace.consumed(binary, request: request)
+    }
+  }
 }
 
 private actor RepairTargets {
@@ -50,6 +92,7 @@ private actor CachedPayloads {
 }
 
 private final class UpdateExecution: Sendable {
+  let workspace: TransferWorkspace
   private let plan: UpdatePlan
   private let cacheOnly: Bool
   private let cachedPayloads = CachedPayloads()
@@ -60,6 +103,7 @@ private final class UpdateExecution: Sendable {
   private let journal: UpdateJournal?
   private let operationLock: TransferFileLock
   private let snapshots: OriginalSnapshots
+  private let originalsDirectory: URL
   private let io: WorkLimiter
   private let repairs = RepairTargets()
   private let downloadWorkers: Int
@@ -70,6 +114,11 @@ private final class UpdateExecution: Sendable {
     installer: Installer, downloadWorkers: Int, writeWorkers: Int, reporter: UpdateReporter,
     cacheOnly: Bool, gameID: String, mode: GameBranchCategoryScenario, predownload: Bool
   ) async throws {
+    guard cacheOnly || settings.diskCacheEnabled || settings.writeMode != .inPlace else {
+      throw SophonClientError.UnknownError(
+        "In-place updates require disk recovery originals; use temporary output with --no-disk-cache"
+      )
+    }
     self.settings = settings
     self.cacheOnly = cacheOnly
     self.downloadCache = downloadCache
@@ -103,21 +152,19 @@ private final class UpdateExecution: Sendable {
     self.journal = journal
     let activePlan = journal?.plan ?? plan
     self.plan = activePlan
-    let snapshotDirectory = settings.cacheURL.appendingPathComponent("snapshots")
-      .appendingPathComponent(transferKey(gameDirectory.path), isDirectory: true)
-    // RAM/disk snapshots are disposable. Durable in-place originals live separately.
-    try await runTransferIO { try removeOwnedFile(snapshotDirectory) }
-    let cache = try BinaryCache(
-      directory: snapshotDirectory, memoryLimit: settings.memoryLimit,
-      diskLimit: settings.diskLimit, entryLimit: settings.entryLimit)
-    let originals = settings.cacheURL.appendingPathComponent("originals")
-      .appendingPathComponent(transferKey(gameDirectory.path), isDirectory: true)
+    workspace = try await TransferWorkspace(
+      settings: settings, gameDirectory: gameDirectory, operation: "update",
+      transport: downloadCache, io: io)
+    let originals = stateDirectory.appendingPathComponent("originals", isDirectory: true)
+    originalsDirectory = originals
     let sizes = try await runTransferIO {
       try OriginalSnapshots.existingSizes(directory: originals)
     }
     snapshots = OriginalSnapshots(
-      cache: cache, directory: originals, diskLimit: settings.diskLimit, io: io, plan: activePlan,
-      writeMode: settings.writeMode, existingSizes: sizes, cacheOnly: cacheOnly)
+      cache: workspace.cache, directory: originals, io: io,
+      plan: activePlan,
+      writeMode: settings.writeMode, existingSizes: sizes, cacheOnly: cacheOnly,
+      telemetry: workspace.telemetry, diskCacheEnabled: settings.diskCacheEnabled)
   }
 
   func run() async throws {
@@ -164,9 +211,17 @@ private final class UpdateExecution: Sendable {
         }
       }
       try await runTransferIO(checkCancellation: false) { [journal] in try journal?.complete() }
+      await snapshots.close()
+      try await workspace.finish(completed: true)
+      try await runTransferIO(checkCancellation: false) { [originalsDirectory] in
+        try removeOwnedFile(originalsDirectory)
+      }
+      await reporter.record(.resourcesUpdated(workspace.telemetry.snapshot()))
       await reporter.record(.finished(.completed))
     } catch {
-      await snapshots.cancel()
+      await snapshots.close()
+      try? await workspace.finish(completed: false)
+      await reporter.record(.resourcesUpdated(workspace.telemetry.snapshot()))
       await reporter.record(
         .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
       throw error
@@ -174,20 +229,59 @@ private final class UpdateExecution: Sendable {
   }
 
   private func pipeline(excluding recovered: Set<URL>) async throws {
+    let bundles = plan.patchBundles.filter { bundle in
+      bundle.patches.contains { !recovered.contains($0.target.fileURL) }
+    }
+    await reporter.record(.patchDownloadsPlanned(bytes: bundles.reduce(0) { $0 + $1.patchSize }))
+    for bundle in bundles {
+      let request = try bundle.downloadRequest()
+      let retained =
+        cacheOnly
+        ? try await downloadCache.retainedBytes(request)
+        : try await workspace.retainedBytes(request)
+      workspace.telemetry.planDownload(bundle.patchID, size: bundle.patchSize, retained: retained)
+    }
+    await reporter.record(.resourcesUpdated(workspace.telemetry.snapshot()))
     let ready = AsyncChannel<ReadyPatch>()
     let downloadLimit = WorkLimiter(limit: min(downloadWorkers, settings.entryLimit))
     try await withThrowingTaskGroup(of: Void.self) { group in
       group.addTask { [self] in
         defer { ready.finish() }
         try await withThrowingTaskGroup(of: Void.self) { downloads in
-          for bundle in plan.patchBundles {
+          for bundle in bundles {
             let patches = bundle.patches.filter { !recovered.contains($0.target.fileURL) }
             guard !patches.isEmpty else { continue }
             downloads.addTask { [self] in
               try await downloadLimit.withPermit {
-                let payload = try await downloadCache.get(
-                  bundle.downloadRequest(), waitForSpace: !cacheOnly)
-                if cacheOnly { await cachedPayloads.retain(payload) }
+                let request = try bundle.downloadRequest()
+                let payload: PatchPayload
+                if cacheOnly {
+                  let downloaded = try await downloadCache.get(
+                    request, waitForSpace: false, telemetry: workspace.telemetry)
+                  await cachedPayloads.retain(downloaded)
+                  payload = PatchPayload(
+                    input: .download(downloaded, offset: 0, size: downloaded.size),
+                    request: request, consumers: patches.count)
+                } else {
+                  var memoryHeadroom: UInt64 = 0
+                  var diskHeadroom: UInt64 = 0
+                  for original in patches.compactMap(\.original) {
+                    if await snapshots.requiresDisk(original)
+                      || original.size > settings.memoryLimit
+                    {
+                      diskHeadroom = max(diskHeadroom, original.size)
+                    } else {
+                      memoryHeadroom = max(memoryHeadroom, original.size)
+                    }
+                  }
+                  let binary = try await workspace.download(
+                    request,
+                    purpose: .download(
+                      memoryHeadroom: memoryHeadroom, diskHeadroom: diskHeadroom))
+                  payload = PatchPayload(
+                    input: .cached(binary), request: request, consumers: patches.count,
+                    workspace: workspace)
+                }
                 await reporter.record(
                   .bundleDownloaded(patchID: bundle.patchID, bytes: bundle.patchSize))
                 for patch in patches {
@@ -208,6 +302,7 @@ private final class UpdateExecution: Sendable {
           for await job in ready {
             try Task.checkCancellation()
             try await process(job, worker: worker)
+            try await job.bundle.consumed()
           }
         }
       }
@@ -226,7 +321,7 @@ private final class UpdateExecution: Sendable {
       return
     }
     await reporter.record(.fileStarted(fileURL: patch.target.fileURL))
-    let input = PatchInput.download(job.bundle, offset: patch.patchOffset, size: patch.patchLength)
+    let input = try job.bundle.input.slice(offset: patch.patchOffset, size: patch.patchLength)
     let isHDiff = try await runTransferIO { try input.isHDiff() }
     var originalInput: PatchInput?
     if isHDiff, let original = patch.original {
@@ -260,7 +355,7 @@ private final class UpdateExecution: Sendable {
     let output = settings.writeMode == .inPlace ? patch.target.fileURL : paths.temporary
     let request = PatchApplyRequest(
       original: originalInput, patch: input, target: patch.target, outputURL: output,
-      synchronize: settings.ioPolicy == .serialized)
+      synchronize: settings.ioPolicy == .serialized, telemetry: workspace.telemetry)
     do {
       try await io.withPermit { [journal] in
         try await runTransferIO { try journal?.record(patch.target.fileURL, stage: .writing) }
@@ -292,7 +387,12 @@ private final class UpdateExecution: Sendable {
 
   private func current(_ target: PlannedUpdateFile) async throws -> Bool {
     try await io.withPermit {
-      let digest = try await runTransferIO { try digestFile(target.fileURL) }
+      let digest = try await runTransferIO {
+        guard (try? transferFileMetadata(target.fileURL).size) == target.size else {
+          return nil as FileDigest?
+        }
+        return try digestFile(target.fileURL, telemetry: self.workspace.telemetry)
+      }
       return digest?.size == target.size && digest?.md5 == target.md5.lowercased()
     }
   }
@@ -322,16 +422,15 @@ private final class UpdateExecution: Sendable {
         {
           try FileManager.default.moveItem(at: paths.backup, to: target.fileURL)
         }
-        if let digest = try digestFile(paths.temporary),
+        if let digest = try digestFile(paths.temporary, telemetry: self.workspace.telemetry),
           digest.size == target.size, digest.md5 == target.md5.lowercased()
         {
           try commitUpdatedFile(
             temporary: paths.temporary, target: target.fileURL, backup: paths.backup)
           return true
         }
-        if let stage = journal?.stage(of: target.fileURL),
-          [.writing, .repair, .cachedRepair].contains(stage),
-          let digest = try digestFile(target.fileURL),
+        if (try? transferFileMetadata(target.fileURL).size) == target.size,
+          let digest = try digestFile(target.fileURL, telemetry: self.workspace.telemetry),
           digest.size == target.size, digest.md5 == target.md5.lowercased()
         {
           try removeOwnedFile(paths.backup)
@@ -438,7 +537,8 @@ private final class UpdateExecution: Sendable {
     }
     do {
       try await installer.execute(
-        repairPlan, reporter: repairReporter, serializedWrites: settings.ioPolicy == .serialized)
+        repairPlan, reporter: repairReporter, serializedWrites: settings.ioPolicy == .serialized,
+        workspace: workspace)
     } catch {
       await repairReporter.unsubscribe(subscription.id)
       await progress.value
@@ -460,7 +560,7 @@ private final class UpdateExecution: Sendable {
       let output = paths[file.fileURL]!
       let paths = outputPaths(file)
       try await runTransferIO { [journal] in
-        let digest = try digestFile(output)
+        let digest = try digestFile(output, telemetry: self.workspace.telemetry)
         guard digest?.size == file.size, digest?.md5 == file.md5.lowercased() else {
           throw SophonClientError.InvalidChecksumError(
             expected: file.md5, actual: digest?.md5 ?? "missing")

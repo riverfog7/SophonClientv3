@@ -25,24 +25,49 @@ enum BinaryCacheError: LocalizedError {
 }
 
 actor BinaryCache {
+  enum Purpose: Sendable {
+    case input
+    case download(memoryHeadroom: UInt64, diskHeadroom: UInt64)
+
+    var headroom: (memory: UInt64, disk: UInt64) {
+      if case .download(let memory, let disk) = self { return (memory, disk) }
+      return (0, 0)
+    }
+    var isDownload: Bool {
+      if case .download = self { return true }
+      return false
+    }
+  }
+
   // The backing owns this reservation, including while slices or readers use it.
   final class Reservation: Sendable {
     private let cache: BinaryCache
     let size: UInt64
     let inMemory: Bool
+    let id: UUID
+    let device: String
+    let telemetry: TransferTelemetry?
 
-    fileprivate init(cache: BinaryCache, size: UInt64, inMemory: Bool) {
+    fileprivate init(
+      cache: BinaryCache, id: UUID, size: UInt64, inMemory: Bool, device: String,
+      telemetry: TransferTelemetry?
+    ) {
       self.cache = cache
+      self.id = id
       self.size = size
       self.inMemory = inMemory
+      self.device = device
+      self.telemetry = telemetry
     }
 
     deinit {
       let cache = cache
       let size = size
       let inMemory = inMemory
+      let id = id
+      let device = device
       Task {
-        await cache.release(size: size, inMemory: inMemory)
+        await cache.release(id: id, size: size, inMemory: inMemory, device: device)
       }
     }
   }
@@ -50,6 +75,9 @@ actor BinaryCache {
   private struct Waiter {
     let id: UUID
     let size: UInt64
+    let purpose: Purpose
+    let forceDisk: Bool
+    let device: String
     let continuation: CheckedContinuation<Reservation, any Error>
   }
 
@@ -57,12 +85,20 @@ actor BinaryCache {
   private let memoryLimit: UInt64
   private let diskLimit: UInt64
   private let entryLimit: Int
+  private let telemetry: TransferTelemetry?
+  private let device: String
+  private var headrooms: [UUID: (memory: UInt64, disk: UInt64)] = [:]
   private var memoryBytes: UInt64 = 0
   private var diskBytes: UInt64 = 0
+  private var inputMemoryBytes: UInt64 = 0
+  private var inputDiskBytes: UInt64 = 0
   private var entryCount = 0
   private var waiters: [Waiter] = []
 
-  init(directory: URL, memoryLimit: UInt64, diskLimit: UInt64, entryLimit: Int) throws {
+  init(
+    directory: URL, memoryLimit: UInt64, diskLimit: UInt64, entryLimit: Int,
+    telemetry: TransferTelemetry? = nil
+  ) throws {
     guard directory.isFileURL, entryLimit > 0 else {
       throw BinaryCacheError.invalidConfiguration
     }
@@ -70,15 +106,30 @@ actor BinaryCache {
     self.memoryLimit = min(memoryLimit, UInt64(Int.max))
     self.diskLimit = min(diskLimit, UInt64(Int64.max))
     self.entryLimit = entryLimit
+    self.telemetry = telemetry
+    self.device = telemetry?.register(directory, role: "Cache") ?? ""
   }
 
   internal var usage: (memory: UInt64, disk: UInt64, entries: Int) {
     (memoryBytes, diskBytes, entryCount)
   }
 
-  internal func makeWriter(expectedSize: UInt64) async throws -> CachedBinaryWriter {
+  internal func makeWriter(
+    expectedSize: UInt64, purpose: Purpose = .input, fileURL: URL? = nil,
+    forceDisk: Bool = false, preserveFile: Bool = false
+  ) async throws -> CachedBinaryWriter {
     try Task.checkCancellation()
-    guard expectedSize <= memoryLimit || expectedSize <= diskLimit else {
+    let headroom = purpose.headroom
+    if purpose.isDownload, headroom.memory > 0 || headroom.disk > 0, entryLimit < 2 {
+      throw BinaryCacheError.invalidConfiguration
+    }
+    let fitsMemory =
+      !forceDisk && expectedSize <= memoryLimit
+      && headroom.memory <= memoryLimit - expectedSize && headroom.disk <= diskLimit
+    let fitsDisk =
+      expectedSize <= diskLimit && headroom.disk <= diskLimit - expectedSize
+      && headroom.memory <= memoryLimit
+    guard fitsMemory || fitsDisk else {
       throw BinaryCacheError.entryTooLarge(expectedSize)
     }
 
@@ -89,34 +140,80 @@ actor BinaryCache {
           continuation.resume(throwing: CancellationError())
           return
         }
-        waiters.append(Waiter(id: id, size: expectedSize, continuation: continuation))
+        let activeDevice = fileURL.flatMap { telemetry?.register($0, role: "Cache") } ?? device
+        waiters.append(
+          Waiter(
+            id: id, size: expectedSize, purpose: purpose, forceDisk: forceDisk,
+            device: activeDevice, continuation: continuation))
         admitWaiters()
       }
     } onCancel: {
       Task { await self.cancelWaiter(id) }
     }
 
-    return try await CachedBinaryWriter.make(reservation: reservation, directory: directory)
+    return try await CachedBinaryWriter.make(
+      reservation: reservation, directory: directory, fileURL: fileURL, preserveFile: preserveFile)
   }
 
   private func admitWaiters() {
-    while entryCount < entryLimit, let waiter = waiters.first {
-      let inMemory: Bool
-      if waiter.size <= memoryLimit - memoryBytes {
-        inMemory = true
-        memoryBytes += waiter.size
-      } else if waiter.size <= diskLimit - diskBytes {
-        inMemory = false
-        diskBytes += waiter.size
-      } else {
-        return
+    while entryCount < entryLimit {
+      // Inputs and processing buffers must not wait behind downloads that need their consumers.
+      let order = waiters.indices.sorted {
+        let lhs = waiters[$0].purpose.isDownload
+        let rhs = waiters[$1].purpose.isDownload
+        return lhs == rhs ? $0 < $1 : !lhs
       }
-
-      entryCount += 1
-      waiters.removeFirst()
-      waiter.continuation.resume(
-        returning: Reservation(cache: self, size: waiter.size, inMemory: inMemory)
-      )
+      var admitted = false
+      for index in order {
+        let waiter = waiters[index]
+        let requested = waiter.purpose.headroom
+        let requestedMemory =
+          waiter.purpose.isDownload
+          ? max(requested.memory, headrooms.values.map(\.memory).max() ?? 0) : 0
+        let requestedDisk =
+          waiter.purpose.isDownload
+          ? max(requested.disk, headrooms.values.map(\.disk).max() ?? 0) : 0
+        let memoryHeadroom = requestedMemory - min(requestedMemory, inputMemoryBytes)
+        let diskHeadroom = requestedDisk - min(requestedDisk, inputDiskBytes)
+        if waiter.purpose.isDownload, requestedMemory > 0 || requestedDisk > 0,
+          entryCount >= entryLimit - 1
+        {
+          continue
+        }
+        let freeMemory = memoryLimit - memoryBytes
+        let freeDisk = diskLimit - diskBytes
+        let inMemory: Bool
+        if !waiter.forceDisk, waiter.size <= freeMemory,
+          memoryHeadroom <= freeMemory - waiter.size, diskHeadroom <= freeDisk
+        {
+          inMemory = true
+          memoryBytes += waiter.size
+        } else if waiter.size <= freeDisk, diskHeadroom <= freeDisk - waiter.size,
+          memoryHeadroom <= freeMemory
+        {
+          inMemory = false
+          diskBytes += waiter.size
+        } else {
+          continue
+        }
+        if waiter.purpose.isDownload {
+          headrooms[waiter.id] = requested
+        } else if inMemory {
+          inputMemoryBytes += waiter.size
+        } else {
+          inputDiskBytes += waiter.size
+        }
+        entryCount += 1
+        telemetry?.reserve(waiter.size, inMemory: inMemory, device: waiter.device)
+        waiters.remove(at: index)
+        waiter.continuation.resume(
+          returning: Reservation(
+            cache: self, id: waiter.id, size: waiter.size, inMemory: inMemory,
+            device: waiter.device, telemetry: telemetry))
+        admitted = true
+        break
+      }
+      if !admitted { return }
     }
   }
 
@@ -127,13 +224,21 @@ actor BinaryCache {
     admitWaiters()
   }
 
-  private func release(size: UInt64, inMemory: Bool) {
+  private func release(id: UUID, size: UInt64, inMemory: Bool, device: String) {
     if inMemory {
       memoryBytes -= size
+      if headrooms[id] == nil { inputMemoryBytes -= size }
     } else {
       diskBytes -= size
+      if headrooms[id] == nil { inputDiskBytes -= size }
     }
     entryCount -= 1
+    headrooms.removeValue(forKey: id)
+    telemetry?.release(size, inMemory: inMemory, device: device)
     admitWaiters()
+  }
+
+  func waitUntilUnused() async {
+    while entryCount > 0 { try? await Task.sleep(for: .milliseconds(5)) }
   }
 }
