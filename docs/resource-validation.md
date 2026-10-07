@@ -120,3 +120,69 @@ The final debug run sustained **54.3 MiB/s** between the samples nearest 10 and 
 A late profile of the original release code, after the cache filled, still attributed 70% of sampled cycles to quota scans and 48% to file attributes. That rules out debug optimization alone as the main explanation. The indexed code no longer had those queries among the dominant sampled functions. Cache-payload logical peaks stayed below 1 GiB, and every diagnosis/retest target size and MD5 matched. Coverage remains in the existing Swift test file: 24 cases across eight functions passed, including shared cache indexes, metadata timestamp parity, shrinking limits, cancellation, corruption, and transfer recovery. Strict Swift formatting checks passed.
 
 A real `SIGKILL` test of the indexed/queued downloader retained 310 placement receipts and seven partial payloads. Restart finished the selected installation directly from its saved plan; all 19 output hashes matched, and the download pool remained below 1 GiB. The test data and RAM filesystems were cleaned up afterward; the actual ZZZ installation and protected Genshin tar were preserved.
+
+## Follow-up: removing network limits and comparing cache backends
+
+Measured on 2026-10-07 with the current debug CLI. Benchmarks ran sequentially; the matrix paused after its active case completed while voice-pack detection and the macOS lock failure were fixed. The installer selection contained 12 real Korean ZZZ audio files, 737 chunks, 870,573,805 source bytes and 870,742,236 output bytes. The updater selection contained five real Genshin targets, 723,512,931 original bytes, 53,193,436 prefetched patch bytes and 776,583,235 output bytes.
+
+Unrestricted installation data came from an HTTP/1.1 loopback server serving verified CDN chunks from the SSD. A direct control transferred 234,962,462 bytes at 209.4 MiB/s; actual rates vary with request batching and cache warmth. This removes the Internet bandwidth bottleneck while exercising the normal HTTP, checksum, decompression, placement, cache, and journal paths. The limited-network server used one aggregate 10 MiB/s pacer across all connections. Cached updater bundles used no payload HTTP requests.
+
+Disk-cache-on stored payloads on the internal SSD. Disk-cache-off put the same filesystem cache on tmpfs; this removes physical cache writes but is not a new in-process download backend. Both payload pools had a 500 MiB logical-byte limit, smaller than the 830 MiB download selection. Original updater snapshots had a separate 2 GiB RAM budget and never spilled. Process RSS excludes tmpfs payload pages; peak total RAM use includes those pages in addition to the listed RSS. State files remained on SSD.
+
+Slow-target cases used an owned ext4 loop volume with 10 or 20 MiB/s limits in each direction and 1,000 IOPS. A 1.5 GiB memory-high threshold and 2 GiB maximum bounded OS buffering; these groups had no OOM events. Read and write limits are independent, so concurrent directions can total twice the nominal per-direction rate. This emulation does not reproduce real card latency, controller contention, or HDD seeks. SSD cases had no I/O throttle.
+
+Each timing ends after explicit fsync of the target and cache files in the same I/O-limited group. Checksums were verified independently after timing. This avoids counting buffered output as completed device work. Throughput is output bytes divided by that flushed duration. CPU percentage treats one logical core as 100%. These are single-trial workload measurements; short SSD cases, in particular, are not enough to rank closely spaced stream counts.
+
+### Installation: two write streams
+
+| Network | Target | SSD disk cache: output MiB/s | RAM cache: output MiB/s | SSD cache RSS MiB | RAM cache RSS MiB |
+| --- | --- | --- | --- | --- | --- |
+| No Internet bottleneck | SSD, unrestricted | 114.44 | 228.41 | 103.4 | 128.8 |
+| No Internet bottleneck | 20 MiB/s emulation | 16.45 | 18.60 | 133.0 | 155.2 |
+| 10 MiB/s | SSD, unrestricted | 9.80 | 9.86 | 95.5 | 94.2 |
+| 10 MiB/s | 20 MiB/s emulation | 9.12 | 9.25 | 92.6 | 98.4 |
+
+A 500 MiB RAM payload cache sustained the 10 MiB/s network stream with either target. With an unrestricted source it supported over 200 MiB/s on SSD and about 19 MiB/s on the 20 MiB/s target. RAM caching cannot raise sustained device output beyond that device's limit. The slow target with an SSD cache performed worse than the RAM-cache case, but the difference was modest compared with moving the cache onto the slow volume itself.
+
+Additional installer cases:
+
+| Target / source / cache | Streams | Flushed output MiB/s | Peak RSS MiB |
+| --- | --- | --- | --- |
+| ssd target / fast source / ram cache | 1 | 269.82 | 129.9 |
+| ssd target / fast source / ram cache | 2 | 228.41 | 128.8 |
+| ssd target / fast source / ram cache | 4 | 269.68 | 127.9 |
+| 20 target / fast source / ram cache | 1 | 19.02 | 147.8 |
+| 20 target / fast source / ram cache | 2 | 18.60 | 155.2 |
+| 20 target / fast source / ram cache | 4 | 19.24 | 153.9 |
+| 10 target / fast source / ram cache | 2 | 9.64 | 152.2 |
+| 10 target / 10 source / ram cache | 2 | 6.54 | 125.7 |
+| 20 target / fast source / slowdisk cache | 2 | 8.92 | 105.2 |
+
+Here `fast` means the unrestricted local source and `10` means 10 MiB/s. The `slowdisk` case placed both cache and target on the 20 MiB/s emulated volume; its 8.92 MiB/s result is approximately half the fast-cache target-only rate. The combined 10 MiB/s network and 10 MiB/s target case took 116.1 seconds to place data and 127.0 seconds including flushing, reaching 6.54 MiB/s. The slowdown is observed; this test alone does not isolate the contribution of buffering, pacing, and request scheduling.
+
+### Cached native patching: no payload network traffic
+
+| Target | Payload cache | Streams | Flushed output MiB/s | Wall seconds | Peak RSS MiB |
+| --- | --- | --- | --- | --- | --- |
+| ssd | disk | 1 | 105.34 | 7.03 | 203.3 |
+| ssd | disk | 2 | 105.37 | 7.03 | 343.2 |
+| ssd | disk | 4 | 163.84 | 4.52 | 625.8 |
+| ssd | ram | 1 | 134.30 | 5.51 | 204.0 |
+| ssd | ram | 2 | 113.41 | 6.53 | 343.9 |
+| ssd | ram | 4 | 245.04 | 3.02 | 626.9 |
+| 20 | disk | 1 | 9.86 | 75.09 | 204.0 |
+| 20 | disk | 2 | 13.24 | 55.94 | 347.4 |
+| 20 | disk | 4 | 11.13 | 66.55 | 630.4 |
+| 20 | ram | 1 | 9.86 | 75.08 | 203.7 |
+| 20 | ram | 2 | 13.35 | 55.49 | 347.5 |
+| 20 | ram | 4 | 11.22 | 66.02 | 628.7 |
+
+On the slow target, two read/write streams improved this selected patch workload over one, while four were slower than two and used more RAM. Single-stream slow-target cases used serialized target I/O; two/four-stream cases allowed target reads and writes to overlap. Independent directional limits permit that overlap, so the result should not be treated as proof that two streams help a real microSD or HDD. Payload-cache location had little effect on this patch selection because its 51 MiB of patches was small compared with reading and writing the game data.
+
+All 27 cases stayed within the 500 MiB payload-pool limit; original snapshot disk spill was zero. All 240 output sizes and MD5s matched, totaling 22,380,132,360 verified output bytes. The temporary server, volume, cgroups, and test directories were removed afterward. The protected Genshin tar and actual ZZZ installation were preserved.
+
+### Voice selection and macOS test corrections
+
+`nextAction()` now reads installed voice packs using the existing launch-configured language-file parser and passes those packs into each decision. Resumed installations include the saved pack selection and compare the effective selection when starting. The real CLI reports `ko-kr` for ZZZ and `en-us` plus `ko-kr` for GI71.
+
+The supplied macOS crash stack showed `TransferFileLock.deinit` querying a closed FileHandle after a failed flock during initialization. The initializer now acquires the lock using the raw descriptor before assigning ownership to FileHandle. Repeated contention is covered in the existing test file. The resume fixture now seeds its 8 KiB saved prefix directly because Darwin URLProtocol can discard data when a synchronous failure immediately follows data delivery. Linux checks passed; macOS execution could not be performed on this host. The pre-existing protobuf-config warning is separate from the crash.
