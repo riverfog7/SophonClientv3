@@ -19,16 +19,29 @@ public actor UpdateReporter: OperationReportingInternal {
     }
 
     switch event {
-    case .planned(let source, let target, let patchBytes, let installBytes, let totalFiles):
+    case .planned(
+      let source, let target, let patchBytes, let installBytes, let totalFiles, let deleteFiles,
+      let deleteBytes):
       progress.sourceVersion = source
       progress.targetVersion = target
       progress.totalPatchBytes = patchBytes
       progress.totalInstallBytes = installBytes
       progress.totalFiles = totalFiles
+      progress.totalDeleteFiles = deleteFiles
+      progress.totalDeleteBytes = deleteBytes
       logger.info("Update planned", metadata: ["source": "\(source)", "target": "\(target)"])
     case .bundleDownloaded(let id, let bytes):
       progress.downloadedBytes += bytes
       logger.debug("Patch bundle ready", metadata: ["patch.id": "\(id)", "bytes": "\(bytes)"])
+    case .fileStarted(let fileURL):
+      logger.debug("Processing update target", metadata: ["file": "\(fileURL.path)"])
+    case .repairPlanned(let downloadBytes, let writeBytes):
+      progress.totalRepairDownloadBytes = downloadBytes
+      progress.totalRepairWriteBytes = writeBytes
+    case .repairDownloaded(let bytes):
+      progress.repairDownloadedBytes += bytes
+    case .repairWritten(let bytes):
+      progress.repairWrittenBytes += bytes
     case .fileNeedsRepair(let fileURL):
       progress.repairFiles += 1
       logger.info("Update target queued for repair", metadata: ["file": "\(fileURL.path)"])
@@ -42,6 +55,7 @@ public actor UpdateReporter: OperationReportingInternal {
       logger.debug("Update target cached", metadata: ["file": "\(fileURL.path)"])
     case .fileDeleted(let fileURL, let bytes):
       progress.deletedBytes += bytes
+      progress.processedDeleteFiles += 1
       logger.debug("Removed obsolete file", metadata: ["file": "\(fileURL.path)"])
     case .phaseChanged(let phase):
       progress.phase = phase

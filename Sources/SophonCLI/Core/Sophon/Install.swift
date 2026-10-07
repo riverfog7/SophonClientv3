@@ -242,7 +242,7 @@ struct InstallCLI: AsyncParsableCommand, Sendable {
 }
 
 // Each meter measures completed work, not in-flight network traffic or physical device activity.
-private struct InstallMeter {
+struct InstallMeter {
   var value: UInt64 = 0
   var total: UInt64?
   var started: Double = 0
@@ -298,7 +298,7 @@ private struct InstallMeter {
   func elapsed(at time: Double) -> Double { max(0, (ended ?? time) - started) }
 }
 
-private struct InstallFrame: Sendable {
+struct InstallFrame: Sendable {
   let lines: [String]
   let force: Bool
 }
@@ -589,12 +589,11 @@ private actor InstallDashboard {
   }
 }
 
-private func installColumn(_ text: String, width: Int = 38) -> String {
+func installColumn(_ text: String, width: Int = 38) -> String {
   text + String(repeating: " ", count: max(2, width - text.count))
 }
 
-private func installBar(_ value: UInt64, _ total: UInt64?, at time: Double, unicode: Bool) -> String
-{
+func installBar(_ value: UInt64, _ total: UInt64?, at time: Double, unicode: Bool) -> String {
   let width = 28
   let fill = unicode ? "█" : "="
   let empty = unicode ? "░" : "-"
@@ -619,7 +618,7 @@ private func installPhaseName(_ phase: InstallationPhase) -> String {
   }
 }
 
-private func installBytes(_ bytes: Double) -> String {
+func installBytes(_ bytes: Double) -> String {
   let units = ["B", "kB", "MB", "GB", "TB", "PB", "EB"]
   var value = max(0, bytes)
   var unit = 0
@@ -632,25 +631,25 @@ private func installBytes(_ bytes: Double) -> String {
     locale: Locale(identifier: "en_US_POSIX"), value, units[unit])
 }
 
-private func installSpeed(_ rate: Double?) -> String {
+func installSpeed(_ rate: Double?) -> String {
   guard let rate, rate.isFinite else { return "—" }
   return installBytes(rate) + "/s"
 }
 
-private func installPercent(_ value: UInt64, _ total: UInt64?) -> String {
+func installPercent(_ value: UInt64, _ total: UInt64?) -> String {
   guard let total else { return "—" }
   let percent = total == 0 ? 100 : min(100, Double(value) / Double(total) * 100)
   return String(format: "%.1f%%", locale: Locale(identifier: "en_US_POSIX"), percent)
 }
 
-private func installDuration(_ value: Double?) -> String {
+func installDuration(_ value: Double?) -> String {
   guard let value, value.isFinite, value >= 0 else { return "—" }
   if value > 86400 { return String(format: "%.1f d", value / 86400) }
   let seconds = Int(value.rounded(.up))
   return String(format: "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
 }
 
-private func installText(_ value: String, limit: Int = 140) -> String {
+func installText(_ value: String, limit: Int = 140) -> String {
   let safe = String(
     String.UnicodeScalarView(
       value.unicodeScalars.map {
@@ -660,7 +659,7 @@ private func installText(_ value: String, limit: Int = 140) -> String {
 }
 
 // Mutable terminal state and potentially blocking writes are confined to this serial queue.
-private final class InstallTerminal: @unchecked Sendable {
+final class InstallTerminal: @unchecked Sendable {
   let interactive: Bool
   private let colors: Bool
   private let queue = DispatchQueue(label: "sophon.cli.output")
@@ -752,7 +751,10 @@ private final class InstallTerminal: @unchecked Sendable {
       style = "1;31"
     } else if line.hasPrefix("  CANCEL") || line.hasPrefix("  Retry") {
       style = "1;33"
-    } else if ["  METADATA", "  VERIFICATION", "  TRIMMING", "  RUNNING"].contains(line)
+    } else if [
+      "  METADATA", "  VERIFICATION", "  TRIMMING", "  RUNNING", "  CACHING", "  REPAIRING",
+      "  DELETING",
+    ].contains(line)
       || line.hasPrefix("  Read")
     {
       style = "1"

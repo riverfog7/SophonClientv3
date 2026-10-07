@@ -14,6 +14,8 @@ swift build
 
 `GAME` accepts an API game ID or biz. `--cn` selects CN endpoints; `--mode base` selects the base installation scenario. `update --predownload` selects the future branch; `--cache-at PATH` downloads and verifies its diff bundles there, without scanning patch sources, applying patches, or deleting game files. The default source version is detected from the configured executable MD5 and API version records; `--from` overrides it. `update --plan` prints the static manifest plan without modifying game files.
 
+Update uses the installation command's terminal dashboard, showing versions, patch data ready, file progress, skipped targets, repairs, verified output, planned/processed deletions, and the current file. Repair downloads and writes have separate meters. Rates are averages for completed bundles and verified output files, including reused downloads. Use `--plain` for append-only summaries or `--refresh-interval` to adjust refreshes. Progress goes to stderr; `--plan` keeps JSON on stdout.
+
 ## Cache and recovery
 
 Install and update downloads share a persistent cache. Occupied bytes and eviction order are tracked in memory; a revision marker refreshes accounting after another process changes payloads. Received prefixes of 4 MiB HTTP ranges are journaled after writing their bytes, and resumed requests start at those prefixes. Servers that ignore Range requests fall back to a full request. Payload size and MD5 are checked before use; cached predownloads are rechecked when read. Idle completed payloads can be evicted when space is needed; unfinished downloads are retained.

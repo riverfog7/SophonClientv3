@@ -458,6 +458,12 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   #expect(installFixture.ranges.isEmpty)
   #expect(!FileManager.default.fileExists(atPath: deletion.fileURL.path))
   #expect(try await SophonClientv3.savedUpdateState(at: root, settings: settings)?.finished == true)
+  let appliedProgress = await patched.snapshot()
+  #expect(appliedProgress.writtenBytes == UInt64(fixture.new.count))
+  #expect(appliedProgress.totalDeleteFiles == 1)
+  #expect(appliedProgress.processedDeleteFiles == 1)
+  #expect(appliedProgress.totalDeleteBytes == 4)
+  #expect(appliedProgress.deletedBytes == 4)
 
   // Only the updated target falls back to installation when its source is broken.
   try Data(repeating: 0x00, count: fixture.old.count).write(to: target.fileURL)
@@ -479,6 +485,11 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
     plan, settings: settings, downloadCache: cache, installer: installer, reporter: repaired)
   #expect(try Data(contentsOf: target.fileURL) == fixture.new)
   #expect(await repaired.snapshot().repairFiles == (rawPayload ? 0 : 1))
+  let repairProgress = await repaired.snapshot()
+  #expect(repairProgress.repairDownloadedBytes == (rawPayload ? 0 : UInt64(fixture.new.count)))
+  #expect(repairProgress.repairWrittenBytes == (rawPayload ? 0 : UInt64(fixture.new.count)))
+  #expect(repairProgress.totalRepairDownloadBytes == repairProgress.repairDownloadedBytes)
+  #expect(repairProgress.totalRepairWriteBytes == repairProgress.repairWrittenBytes)
   #expect(installFixture.observed == (rawPayload ? [] : [true]))
   #expect(!FileManager.default.fileExists(atPath: deletion.fileURL.path))
 

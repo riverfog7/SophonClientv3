@@ -125,7 +125,8 @@ private final class UpdateExecution: Sendable {
       .planned(
         sourceVersion: plan.sourceVersion, targetVersion: plan.targetVersion,
         patchBytes: plan.patchSize, installBytes: plan.installSize,
-        totalFiles: plan.installFiles.count))
+        totalFiles: plan.installFiles.count, deleteFiles: plan.deleteFiles.count,
+        deleteBytes: plan.deleteSize))
     do {
       guard !cacheOnly || plan.patchSize <= downloadCache.diskLimit else {
         throw SophonClientError.UnknownError("The download cache cannot hold the complete update")
@@ -224,6 +225,7 @@ private final class UpdateExecution: Sendable {
       try await cached(patch)
       return
     }
+    await reporter.record(.fileStarted(fileURL: patch.target.fileURL))
     let input = PatchInput.download(job.bundle, offset: patch.patchOffset, size: patch.patchLength)
     let isHDiff = try await runTransferIO { try input.isHDiff() }
     var originalInput: PatchInput?
@@ -421,7 +423,29 @@ private final class UpdateExecution: Sendable {
         try handle.truncate(atOffset: file.size)
       }
     }
-    try await installer.execute(repairPlan, serializedWrites: settings.ioPolicy == .serialized)
+    await reporter.record(
+      .repairPlanned(downloadBytes: repairPlan.downloadSize, writeBytes: repairPlan.diskWriteSize))
+    let repairReporter = InstallationReporter(logger: reporter.logger)
+    let subscription = await repairReporter.subscribe()
+    let progress = Task { [reporter] in
+      for await event in subscription.events {
+        switch event {
+        case .chunkDownloaded(_, let bytes): await reporter.record(.repairDownloaded(bytes: bytes))
+        case .chunkWritten(_, _, _, let bytes): await reporter.record(.repairWritten(bytes: bytes))
+        default: break
+        }
+      }
+    }
+    do {
+      try await installer.execute(
+        repairPlan, reporter: repairReporter, serializedWrites: settings.ioPolicy == .serialized)
+    } catch {
+      await repairReporter.unsubscribe(subscription.id)
+      await progress.value
+      throw error
+    }
+    await repairReporter.unsubscribe(subscription.id)
+    await progress.value
     if settings.ioPolicy == .serialized {
       // Flush the whole write batch before verification starts reading from the target drive.
       for output in paths.values {
