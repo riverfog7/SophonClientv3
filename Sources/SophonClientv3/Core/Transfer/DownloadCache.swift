@@ -10,7 +10,7 @@ struct CachedDownload: Sendable {
   // Protect the payload from eviction until the last consumer releases it.
   fileprivate let fileLock: TransferFileLock
 
-  func release() throws { try fileLock.close() }
+  func release() throws { try fileLock.release() }
 }
 
 private enum DownloadCacheError: Error {
@@ -115,7 +115,7 @@ actor DownloadCache {
     guard FileManager.default.fileExists(atPath: paths.ready.path) else { return nil }
     let lease = try await acquireLock(paths.lock, shared: true)
     var handedOff = false
-    defer { if !handedOff { try? lease.close() } }
+    defer { if !handedOff { try? lease.release() } }
     let device = telemetry.register(paths.ready, role: "Predownload")
     guard
       let digest = try await runTransferIO({
@@ -269,7 +269,7 @@ actor DownloadCache {
     let device = telemetry?.register(directory, role: "Predownload") ?? ""
     let (fileLock, readyExists) = try await acquirePayloadLock(paths)
     var handedOff = false
-    defer { if !handedOff { try? fileLock.close() } }
+    defer { if !handedOff { try? fileLock.release() } }
 
     // Another process can finish or evict the payload while this lock is acquired.
     if let digest = try await runTransferIO({

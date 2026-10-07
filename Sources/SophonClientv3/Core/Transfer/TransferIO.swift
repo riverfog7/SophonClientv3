@@ -135,7 +135,7 @@ final class TransferFileLock: @unchecked Sendable {
     }
   }
 
-  func close() throws {
+  func release() throws {
     try stateLock.withLock {
       guard !closed else { return }
       defer { closed = true }
@@ -144,7 +144,7 @@ final class TransferFileLock: @unchecked Sendable {
     }
   }
 
-  deinit { try? close() }
+  deinit { try? release() }
 }
 
 actor WorkLimiter {
