@@ -158,7 +158,7 @@ actor DownloadCache {
       if copied {
         let binary = try await writer.finish()
         guard try await runTransferIO({ try binary.checksum() }) == request.md5.lowercased() else {
-          try binary.removeFile()
+          try binary.remove()
           throw SophonClientError.InvalidChecksumError(
             expected: request.md5, actual: "cached payload")
         }

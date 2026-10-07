@@ -461,6 +461,13 @@ func testTransferWorkingCache(scenario: String) async throws {
       #expect(progress.devices.allSatisfy { $0.writtenBytes == 0 && $0.cacheBytes == 0 })
     }
     try await workspace.consumed(binary, request: request)
+    for _ in 0..<50 {
+      if await workspace.cache.usage.entries == 0 { break }
+      try await Task.sleep(for: .milliseconds(1))
+    }
+    #expect(await workspace.cache.usage.entries == 0)
+    // Consumption must free capacity even if an async frame still retains the finished value.
+    withExtendedLifetime(binary) {}
     #expect(
       !FileManager.default.fileExists(
         atPath: downloads.appendingPathComponent(key + ".partial").path))

@@ -268,13 +268,17 @@ struct CachedBinary: Sendable {
 
   internal var inMemory: Bool { storage.reservation.inMemory }
 
-  internal func removeFile() throws {
-    guard let fileURL = storage.fileURL else { return }
-    try removeOwnedFile(fileURL)
-    storage.fileURL = nil
-    storage.reservation.telemetry?.removed(
-      storage.storedBytes, device: storage.reservation.device)
-    storage.storedBytes = 0
+  // Called after the last consumer finishes; retained value copies must not hold cache capacity.
+  internal func remove() throws {
+    if let fileURL = storage.fileURL {
+      try removeOwnedFile(fileURL)
+      storage.fileURL = nil
+      storage.reservation.telemetry?.removed(
+        storage.storedBytes, device: storage.reservation.device)
+      storage.storedBytes = 0
+    }
+    storage.data = nil
+    storage.reservation.release()
   }
 
   internal func data() throws -> Data {

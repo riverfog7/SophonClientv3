@@ -40,7 +40,7 @@ actor BinaryCache {
   }
 
   // The backing owns this reservation, including while slices or readers use it.
-  final class Reservation: Sendable {
+  final class Reservation: @unchecked Sendable {
     private let cache: BinaryCache
     let size: UInt64
     let inMemory: Bool
@@ -48,6 +48,8 @@ actor BinaryCache {
     let device: String
     let telemetry: TransferTelemetry?
     let storedBytes: UInt64
+    private let lock = NSLock()
+    private var released = false
 
     fileprivate init(
       cache: BinaryCache, id: UUID, size: UInt64, inMemory: Bool, device: String,
@@ -62,7 +64,13 @@ actor BinaryCache {
       self.storedBytes = storedBytes
     }
 
-    deinit {
+    func release() {
+      let shouldRelease = lock.withLock {
+        guard !released else { return false }
+        released = true
+        return true
+      }
+      guard shouldRelease else { return }
       let cache = cache
       let size = size
       let inMemory = inMemory
@@ -72,6 +80,8 @@ actor BinaryCache {
         await cache.release(id: id, size: size, inMemory: inMemory, device: device)
       }
     }
+
+    deinit { release() }
   }
 
   private struct Waiter {

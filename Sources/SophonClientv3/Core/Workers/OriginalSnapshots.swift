@@ -188,7 +188,7 @@ actor OriginalSnapshots {
     if let task = tasks.removeValue(forKey: key),
       let snapshot = try? await task.value, case .cached(let binary)? = snapshot.input
     {
-      try await runTransferIO(checkCancellation: false) { try binary.removeFile() }
+      try await runTransferIO(checkCancellation: false) { try binary.remove() }
     }
     if !cacheOnly, diskSizes[key] != nil {
       let fileURL = directory.appendingPathComponent(key + ".original")

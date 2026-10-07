@@ -96,7 +96,7 @@ final class TransferWorkspace: Sendable {
 
   func consumed(_ binary: CachedBinary, request: DownloadRequest) async throws {
     try await runTransferIO(checkCancellation: false) {
-      try binary.removeFile()
+      try binary.remove()
       let key = transferKey("\(request.md5.lowercased()):\(request.size)")
       try removeOwnedFile(self.directory.appendingPathComponent("downloads/\(key).partial"))
       try removeOwnedFile(self.directory.appendingPathComponent("downloads/\(key).jsonl"))
