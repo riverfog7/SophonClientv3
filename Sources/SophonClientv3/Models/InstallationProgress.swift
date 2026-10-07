@@ -4,14 +4,14 @@ import Foundation
   import FoundationNetworking
 #endif
 
-public enum InstallationPhase: String, Sendable {
+public enum InstallationPhase: String, Codable, Sendable {
   case metadata
   case scanning
   case trimming
   case running
 }
 
-public enum InstallationOutcome: Sendable {
+public enum InstallationOutcome: Codable, Sendable {
   case completed
   case failed(reason: String)
   case cancelled
@@ -46,7 +46,7 @@ public enum InstallationEvent: Sendable {
   case finished(InstallationOutcome)
 }
 
-public struct InstallationProgress: BaseProgress {
+public struct InstallationProgress: BaseProgress, Codable {
   public internal(set) var phase: InstallationPhase = .metadata
   public internal(set) var totalDownloadBytes: UInt64?
   public internal(set) var totalWriteBytes: UInt64?

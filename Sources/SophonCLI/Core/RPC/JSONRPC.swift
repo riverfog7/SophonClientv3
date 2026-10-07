@@ -281,14 +281,9 @@ actor RPCDispatcher {
         let forwarding = Task {
           for await _ in subscription.events {
             let snapshot = await reporter.snapshot()
-            let value: JSONValue = .object([
-              "phase": .string(snapshot.phase.rawValue),
-              "downloadedBytes": .unsigned(snapshot.downloadedBytes),
-              "writtenBytes": .unsigned(snapshot.writtenBytes),
-              "completedFiles": .integer(Int64(snapshot.completedFiles)),
-              "totalFiles": snapshot.totalFile.map { .integer(Int64($0)) } ?? .null,
-            ])
-            await self.progress(id, value: value)
+            if let value = try? JSONValue.value(snapshot) {
+              await self.progress(id, value: value)
+            }
           }
         }
         do {
