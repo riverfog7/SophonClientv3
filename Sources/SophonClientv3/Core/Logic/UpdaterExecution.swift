@@ -389,7 +389,7 @@ private final class UpdateExecution: Sendable {
   private func current(_ target: PlannedUpdateFile) async throws -> Bool {
     try await io.withPermit {
       let digest = try await runTransferIO {
-        guard (try? transferFileMetadata(target.fileURL).size) == target.size else {
+        guard (try? transferFileMetadata(target.fileURL.path).size) == target.size else {
           return nil as FileDigest?
         }
         return try digestFile(target.fileURL, telemetry: self.workspace.telemetry)
@@ -430,7 +430,7 @@ private final class UpdateExecution: Sendable {
             temporary: paths.temporary, target: target.fileURL, backup: paths.backup)
           return true
         }
-        if (try? transferFileMetadata(target.fileURL).size) == target.size,
+        if (try? transferFileMetadata(target.fileURL.path).size) == target.size,
           let digest = try digestFile(target.fileURL, telemetry: self.workspace.telemetry),
           digest.size == target.size, digest.md5 == target.md5.lowercased()
         {

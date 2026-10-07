@@ -42,7 +42,7 @@ final class TransferWorkspace: Sendable {
         for file in try FileManager.default.contentsOfDirectory(
           at: folder, includingPropertiesForKeys: [.fileSizeKey])
         where file.pathExtension == "partial" || file.pathExtension == "original" {
-          files[file] = try transferFileMetadata(file).size
+          files[file] = try transferFileMetadata(file.path).size
         }
       }
       var total = files.values.reduce(UInt64(0), +)
