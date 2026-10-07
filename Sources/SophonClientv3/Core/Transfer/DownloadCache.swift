@@ -222,17 +222,19 @@ actor DownloadCache {
     let diskLimit = diskLimit
     try await runTransferIO {
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      let files = try FileManager.default.contentsOfDirectory(
-        at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
+      // Listing names avoids fetching resource values for journals and lock files.
+      // File attributes also avoid Foundation's per-entry URL resource conversion.
+      let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
       var used: UInt64 = 0
       var activeCapacity = false
       var candidates: [(URL, UInt64, Date)] = []
-      for file in files where ["bin", "partial"].contains(file.pathExtension) {
-        let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        let bytes = UInt64(values.fileSize ?? 0)
+      for name in names where name.hasSuffix(".bin") || name.hasSuffix(".partial") {
+        let file = directory.appendingPathComponent(name)
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        let bytes = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
         used += bytes
         if file.pathExtension == "bin", file.deletingPathExtension().lastPathComponent != key {
-          candidates.append((file, bytes, values.contentModificationDate ?? .distantPast))
+          candidates.append((file, bytes, attributes[.modificationDate] as? Date ?? .distantPast))
         } else if file.pathExtension == "partial",
           file.deletingPathExtension().lastPathComponent != key
         {
