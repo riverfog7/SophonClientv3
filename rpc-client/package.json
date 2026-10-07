@@ -3,11 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": "./dist/index.js",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./react": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./node": { "types": "./dist/node.d.ts", "default": "./dist/node.js" },
+    "./neutralino": { "types": "./dist/neutralino.d.ts", "default": "./dist/neutralino.js" }
+  },
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test test/client.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
