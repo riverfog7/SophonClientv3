@@ -122,6 +122,12 @@ test("snapshot progress exposes phase and metrics without event arrays", async (
   client.onProgressBatch(() => { batches++; });
   const progress = installProgress(1024);
   progress.phase = "scanning";
+  progress.metrics.common.resources = {
+    memoryBytes: 0, memoryLimit: 1024, diskLimit: 1024, diskReservedBytes: 0, devices: [], downloads: [],
+    memoryCache: { read: { ...metric(64), rate: 32 }, write: metric(128) },
+    diskCache: { read: metric(16), write: { ...metric(32), rate: 16 } },
+    target: { read: metric(256), write: metric(512) },
+  };
   transport.receive(JSON.stringify({ jsonrpc: "2.0", method: "operation.progress", params: {
     operationID: "snapshot", status: "running", kind: "install", progress,
   } }) + "\n");
@@ -130,6 +136,8 @@ test("snapshot progress exposes phase and metrics without event arrays", async (
   assert.equal(snapshots[0].progress.phase, "scanning");
   assert.equal(snapshots[0].progress.metrics.common.network.completed, 1024);
   assert.equal(batches, 0);
+  assert.equal(snapshots[0].progress.metrics.common.resources.memoryCache.read.rate, 32);
+  assert.equal(snapshots[0].progress.metrics.common.resources.diskCache.write.rate, 16);
   assert.deepEqual(errors, ["snapshot UI failure"]);
   unsubscribe();
   await client.close();

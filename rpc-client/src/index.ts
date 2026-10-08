@@ -83,6 +83,11 @@ export interface SophonDeviceMetrics {
   write: SophonMetric;
 }
 
+export interface SophonIOMetrics {
+  read: SophonMetric;
+  write: SophonMetric;
+}
+
 export interface SophonResourceMetrics {
   memoryBytes: number;
   memoryLimit: number;
@@ -90,6 +95,9 @@ export interface SophonResourceMetrics {
   diskReservedBytes: number;
   devices: SophonDeviceMetrics[];
   downloads: DownloadByteProgress[];
+  memoryCache: SophonIOMetrics;
+  diskCache: SophonIOMetrics;
+  target: SophonIOMetrics;
 }
 
 export interface SophonMetrics {

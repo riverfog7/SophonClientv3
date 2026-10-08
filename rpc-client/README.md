@@ -122,7 +122,7 @@ Progress has `phase`, optional `outcome`, and `metrics`. Updates also include `s
 | `common.read` | Application read bytes, including installation verification |
 | `common.write` | Installation placements or verified update output; excludes already updated files |
 | `common.files` | Completed/total files, including skipped or cached update targets |
-| `common.resources` | RAM/cache limits and usage, per-volume read/write metrics, per-bundle received/retained/new bytes |
+| `common.resources` | RAM/cache limits and usage; separate memory-cache, disk-cache, and target read/write metrics; per-volume I/O and per-bundle bytes |
 | Install `verification` | Assessed bytes, chunks, files, missing and broken file counts |
 | Install `trimming`, `download`, `processing` | Trimmed files, received payload bytes, processed chunks/bytes |
 | Install `downloadedChunks`, `retries` | Completed unique payload downloads and retry attempts |
@@ -135,6 +135,8 @@ Each `SophonMetric` has `completed`, optional `total`, `remaining`, `percentage`
 Installation chunk traffic is aggregated in constant time; resource snapshots include individual patch bundles rather than every installation chunk. Raw chunk events remain available.
 
 Reporters update counters on work events and read live I/O telemetry when a snapshot is requested. They own the clock and metric calculations, with no periodic publishing task. CLI rendering and stdio RPC sampling run outside the reporters at 250 ms by default; HTTP clients choose their polling interval. Applications format the supplied metrics without reconstructing totals, speeds, percentages, or ETAs from raw events.
+
+`common.resources.memoryCache`, `.diskCache`, and `.target` each have `read` and `write` metrics, including `completed` bytes, recent `rate` in bytes/s, and `averageRate`. RAM-cache metrics count logical cache reads/writes, including zero-copy reads and hashing. Disk-cache metrics cover spill, predownload, recovery snapshots, and download journal I/O that is instrumented by the transfer layer. Target metrics count actual target-file reads/writes, independently of verified output totals. Per-volume rows retain combined filesystem I/O when roles share a volume; RAM traffic never enters those rows. These are application counters, not hardware memory bandwidth or physical media throughput.
 
 Received bytes include retained data; `common.network` and `patch.network` count new traffic. Update output is counted after hash verification; per-volume writes include live output/cache I/O before a file finishes. Installation verification distinguishes assessed bytes from actual reads, so missing files advance assessment without claiming a read. These counters are application I/O, not physical device traffic or free-storage estimates.
 
