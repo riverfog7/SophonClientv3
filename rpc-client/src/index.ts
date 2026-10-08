@@ -231,6 +231,11 @@ export type OperationProgressBatch = OperationStatus & (
   | { kind: "update"; events: UpdateEvent[]; progress: UpdateProgress }
 );
 
+export type OperationProgressSnapshot = OperationStatus & (
+  | { kind: "install"; progress: InstallationProgress }
+  | { kind: "update"; progress: UpdateProgress }
+);
+
 export interface Notification {
   method: string;
   params?: unknown;
@@ -361,11 +366,19 @@ export class SophonRpcClient {
   }
 
   onProgressBatch(listener: (batch: OperationProgressBatch) => void | Promise<void>): () => void {
+    return this.onProgress(progress => {
+      if ("events" in progress && Array.isArray(progress.events)) {
+        return listener(progress as OperationProgressBatch);
+      }
+    });
+  }
+
+  onProgress(listener: (progress: OperationProgressSnapshot) => void | Promise<void>): () => void {
     return this.onNotification(({ method, params }) => {
       if (method !== "operation.progress" || !params || typeof params !== "object") return;
-      const batch = params as OperationProgressBatch;
-      if ((batch.kind === "install" || batch.kind === "update") && Array.isArray(batch.events)) {
-        return listener(batch);
+      const progress = params as OperationProgressSnapshot;
+      if ((progress.kind === "install" || progress.kind === "update") && progress.progress) {
+        return listener(progress);
       }
     });
   }

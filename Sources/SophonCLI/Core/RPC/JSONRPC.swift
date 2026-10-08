@@ -313,10 +313,17 @@ actor RPCDispatcher {
   ) async where Reporter.Event: Encodable, Reporter.Progress: Encodable {
     progressSources[id] = { .encoded(await reporter.snapshot()) }
     guard let notify else { return }
-    feeds[id] = await RPCProgressFeed(
-      reporter: reporter, operationID: id, kind: kind,
-      status: { [weak self] in await self?.status[id] ?? .null }, send: notify,
-      onDrained: { [weak self] in await self?.deliveryFinished(id) })
+    let status: @Sendable () async -> JSONValue = { [weak self] in await self?.status[id] ?? .null }
+    let onDrained: @Sendable () async -> Void = { [weak self] in await self?.deliveryFinished(id) }
+    if settings.progressSnapshotsOnly {
+      feeds[id] = await RPCSnapshotFeed(
+        reporter: reporter, operationID: id, kind: kind, status: status, send: notify,
+        onDrained: onDrained)
+    } else {
+      feeds[id] = await RPCProgressFeed(
+        reporter: reporter, operationID: id, kind: kind, status: status, send: notify,
+        onDrained: onDrained)
+    }
   }
 
   private func currentStatus(_ id: String) async throws -> JSONValue {

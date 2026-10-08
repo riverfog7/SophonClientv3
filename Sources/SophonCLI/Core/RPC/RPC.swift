@@ -13,10 +13,15 @@ enum RPCTransport: String, CaseIterable, ExpressibleByArgument {
 struct RPCSessionSettings: Sendable {
   let manifestCacheDir: String?
   let logger: Logger?
+  let progressSnapshotsOnly: Bool
 
-  init(manifestCacheDir: String? = nil, logFile: String? = nil, logLevel: Logger.Level = .info)
+  init(
+    manifestCacheDir: String? = nil, logFile: String? = nil, logLevel: Logger.Level = .info,
+    progressSnapshotsOnly: Bool = false
+  )
     throws
   {
+    self.progressSnapshotsOnly = progressSnapshotsOnly
     self.manifestCacheDir = manifestCacheDir.map {
       URL(fileURLWithPath: $0).standardizedFileURL.path
     }
@@ -94,6 +99,8 @@ struct RPCCLI: AsyncParsableCommand {
       return level
     })
   var logLevel: Logger.Level = .info
+  @Flag(help: "Send progress snapshots at most every 250 ms without raw events (stdio only).")
+  var progressSnapshotsOnly = false
 
   mutating func validate() throws {
     guard (0...65535).contains(port) else {
@@ -113,7 +120,8 @@ struct RPCCLI: AsyncParsableCommand {
 
   mutating func run() async throws {
     let settings = try RPCSessionSettings(
-      manifestCacheDir: manifestCacheDir, logFile: logFile, logLevel: logLevel)
+      manifestCacheDir: manifestCacheDir, logFile: logFile, logLevel: logLevel,
+      progressSnapshotsOnly: progressSnapshotsOnly)
     settings.logger?.info("RPC server started", metadata: ["transport": "\(transport.rawValue)"])
     let writer = RPCOutput()
     if transport == .stdio {

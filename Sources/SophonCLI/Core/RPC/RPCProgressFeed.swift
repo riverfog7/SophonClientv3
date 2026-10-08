@@ -89,6 +89,76 @@ protocol RPCEventDelivery: Sendable {
   func drain() async
 }
 
+// No reporter subscription or event queue. A pending notification samples when the writer selects it.
+actor RPCSnapshotFeed<Reporter: OperationReporting>: RPCEventDelivery
+where Reporter.Progress: Encodable {
+  private let reporter: Reporter
+  private let operationID: String
+  private let kind: String
+  private let status: @Sendable () async -> JSONValue
+  private let send: @Sendable (RPCNotification) async throws -> Void
+  private let onDrained: @Sendable () async -> Void
+  private var terminal: JSONValue?
+  private var sentTerminal = false
+  private var sender: Task<Void, Never>?
+
+  init(
+    reporter: Reporter, operationID: String, kind: String,
+    status: @escaping @Sendable () async -> JSONValue,
+    send: @escaping @Sendable (RPCNotification) async throws -> Void,
+    onDrained: @escaping @Sendable () async -> Void = {}
+  ) async {
+    self.reporter = reporter
+    self.operationID = operationID
+    self.kind = kind
+    self.status = status
+    self.send = send
+    self.onDrained = onDrained
+    sender = Task { await run() }
+  }
+
+  private func run() async {
+    do {
+      while terminal == nil {
+        do { try await Task.sleep(for: .milliseconds(250)) } catch { break }
+        guard terminal == nil else { break }
+        try await send(RPCNotification { await self.notification() })
+      }
+      if terminal != nil, !sentTerminal {
+        try await send(RPCNotification { await self.notification() })
+      }
+    } catch {}
+    await onDrained()
+  }
+
+  private func notification() async -> JSONValue {
+    var params = await status().object ?? [:]
+    let progress = await reporter.snapshot()
+    // Completion can arrive while awaiting a snapshot. Replace queued progress with the terminal message.
+    if let terminal {
+      sentTerminal = true
+      return .object([
+        "jsonrpc": .string("2.0"), "method": .string("operation.finished"), "params": terminal,
+      ])
+    }
+    params["operationID"] = .string(operationID)
+    params["kind"] = .string(kind)
+    params["progress"] = .encoded(progress)
+    return .object([
+      "jsonrpc": .string("2.0"), "method": .string("operation.progress"),
+      "params": .object(params),
+    ])
+  }
+
+  func finish(_ status: JSONValue) {
+    guard terminal == nil else { return }
+    terminal = status
+    sender?.cancel()
+  }
+
+  func drain() async { await sender?.value }
+}
+
 final class RPCProgressFeed<Reporter: OperationReporting>: RPCEventDelivery, Sendable
 where Reporter.Event: Encodable, Reporter.Progress: Encodable {
   private let reporter: Reporter

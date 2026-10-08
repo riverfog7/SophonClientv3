@@ -109,6 +109,32 @@ test("progress batches preserve 10,000 events, framing and listener isolation", 
   await client.close();
 });
 
+test("snapshot progress exposes phase and metrics without event arrays", async () => {
+  const transport = new FakeTransport();
+  const errors = [];
+  const client = SophonRpcClient.fromTransport(transport, {
+    onNotificationError: error => { errors.push(error.message); },
+  });
+  const snapshots = [];
+  let batches = 0;
+  client.onProgress(() => { throw new Error("snapshot UI failure"); });
+  const unsubscribe = client.onProgress(value => { snapshots.push(value); });
+  client.onProgressBatch(() => { batches++; });
+  const progress = installProgress(1024);
+  progress.phase = "scanning";
+  transport.receive(JSON.stringify({ jsonrpc: "2.0", method: "operation.progress", params: {
+    operationID: "snapshot", status: "running", kind: "install", progress,
+  } }) + "\n");
+  await tick();
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].progress.phase, "scanning");
+  assert.equal(snapshots[0].progress.metrics.common.network.completed, 1024);
+  assert.equal(batches, 0);
+  assert.deepEqual(errors, ["snapshot UI failure"]);
+  unsubscribe();
+  await client.close();
+});
+
 test("timeout, abort, RPC failure and process failure reject the appropriate requests", async () => {
   const transport = new FakeTransport();
   const client = SophonRpcClient.fromTransport(transport);
@@ -192,7 +218,7 @@ test("Node stdio supports concurrent wait/cancel, process errors and forced shut
   const hung = await fixture(true);
   try {
     const arguments_ = ["--manifest-cache-dir", join(normal.directory, "manifest cache"),
-      "--log-file", join(normal.directory, "session log.txt"), "--log-level", "debug"];
+      "--log-file", join(normal.directory, "session log.txt"), "--log-level", "debug", "--progress-snapshots-only"];
     const client = NodeClient.stdio(normal.file, arguments_);
     assert.deepEqual(await client.call("argv"), ["rpc", ...arguments_]);
     const seen = [];
@@ -272,7 +298,7 @@ test("Neutralino 3.8/4.11 process APIs preserve quoting, framing and shutdown", 
   const bridge = neutralinoBridge();
   try {
     const arguments_ = ["literal$()", "--manifest-cache-dir", join(normal.directory, "manifest cache"),
-      "--log-file", join(normal.directory, "session log.txt"), "--log-level", "debug"];
+      "--log-file", join(normal.directory, "session log.txt"), "--log-level", "debug", "--progress-snapshots-only"];
     const client = await NeutralinoClient.stdio(normal.file, arguments_, {
       neutralino: bridge.api,
       onStderr: async () => { throw new Error("UI log failure"); },

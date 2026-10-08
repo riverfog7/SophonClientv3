@@ -10,6 +10,7 @@ import Testing
 @testable import class SophonCLI.RPCOutput
 @testable import class SophonCLI.RPCProgressFeed
 @testable import struct SophonCLI.RPCSessionSettings
+@testable import class SophonCLI.RPCSnapshotFeed
 @testable import SophonClientv3
 
 #if canImport(FoundationNetworking)
@@ -1379,6 +1380,128 @@ func testTransferRPCBrokenEventWriter() async {
 }
 
 @Test
+func testTransferRPCSnapshotRate() async throws {
+  let reporter = InstallationReporter(logger: .init(label: "rpc-snapshot"))
+  let frames = AsyncStream<(ContinuousClock.Instant, Data)>.makeStream()
+  let output = RPCOutput(writeFrame: { frames.continuation.yield((.now, $0)) })
+  let watchdog = Task {
+    do {
+      try await Task.sleep(for: .seconds(5))
+      Issue.record("Snapshot-only progress did not arrive")
+      frames.continuation.finish()
+    } catch {}
+  }
+  defer { watchdog.cancel() }
+  let feed = await RPCSnapshotFeed(
+    reporter: reporter, operationID: "snapshot", kind: "install",
+    status: { .object(["status": .string("running")]) },
+    send: { try await output.sendNotification($0) })
+  await reporter.record(.phaseChanged(.scanning))
+  for index in 0..<10_000 {
+    await reporter.record(.chunkDownloaded(chunkID: String(index), bytes: 1))
+  }
+  #expect(await reporter.subscribers.isEmpty)
+  var previous: ContinuousClock.Instant?
+  var iterator = frames.stream.makeAsyncIterator()
+  for _ in 0..<3 {
+    let (time, data) = try #require(await iterator.next())
+    if let previous { #expect(previous.duration(to: time) >= .milliseconds(240)) }
+    previous = time
+    let message = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(message["method"] as? String == "operation.progress")
+    let params = try #require(message["params"] as? [String: Any])
+    #expect(params["events"] == nil)
+    let progress = try JSONDecoder().decode(
+      InstallationProgress.self,
+      from: JSONSerialization.data(withJSONObject: try #require(params["progress"])))
+    #expect(progress.phase == .scanning && progress.metrics.downloadedChunks == 10_000)
+  }
+  await reporter.record(.finished(.completed))
+  await feed.finish(.object(["status": .string("completed")]))
+  await feed.drain()
+}
+
+@Test(arguments: ["completed", "cancelled", "failed"])
+func testTransferRPCSnapshotTerminal(status: String) async throws {
+  let reporter = InstallationReporter(logger: .init(label: "rpc-snapshot"))
+  let frames = AsyncStream<Data>.makeStream()
+  let output = RPCOutput(writeFrame: { frames.continuation.yield($0) })
+  let feed = await RPCSnapshotFeed(
+    reporter: reporter, operationID: "snapshot", kind: "install", status: { .null },
+    send: { try await output.sendNotification($0) })
+  let outcome: InstallationOutcome =
+    status == "failed"
+    ? .failed(reason: "fixture") : status == "cancelled" ? .cancelled : .completed
+  await reporter.record(.finished(outcome))
+  let snapshot = await reporter.snapshot()
+  await feed.finish(
+    .object([
+      "operationID": .string("snapshot"), "status": .string(status), "progress": .encoded(snapshot),
+    ]))
+  await feed.drain()
+  frames.continuation.finish()
+  var count = 0
+  for await data in frames.stream {
+    let message = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(message["method"] as? String == "operation.finished")
+    #expect((message["params"] as? [String: Any])?["status"] as? String == status)
+    count += 1
+  }
+  #expect(count == 1)
+}
+
+@Test
+func testTransferRPCSnapshotBackpressure() async throws {
+  let reporter = InstallationReporter(logger: .init(label: "rpc-snapshot"))
+  let sink = RPCBatchTestSink()
+  let output = RPCOutput(writeFrame: { await sink.write($0) })
+  let watchdog = Task {
+    do {
+      try await Task.sleep(for: .seconds(5))
+      Issue.record("Snapshot writer remained blocked")
+      await sink.release()
+    } catch {}
+  }
+  defer { watchdog.cancel() }
+  let control = Task {
+    try await output.send(
+      .object(["jsonrpc": .string("2.0"), "id": .string("control"), "result": .bool(true)]))
+  }
+  await sink.waitUntilBlocked()
+  let feed = await RPCSnapshotFeed(
+    reporter: reporter, operationID: "snapshot", kind: "install", status: { .null },
+    send: { try await output.sendNotification($0) })
+  let deadline = ContinuousClock.now + .seconds(2)
+  while await output.queuedCounts.notifications == 0, ContinuousClock.now < deadline {
+    try await Task.sleep(for: .milliseconds(5))
+  }
+  for index in 0..<10_000 {
+    await reporter.record(.chunkDownloaded(chunkID: String(index), bytes: 1))
+  }
+  try await Task.sleep(for: .milliseconds(500))
+  #expect(await output.queuedCounts.notifications == 1)
+  #expect(await reporter.subscribers.isEmpty)
+  await reporter.record(.finished(.cancelled))
+  await feed.finish(
+    .object(["status": .string("cancelled"), "progress": .encoded(await reporter.snapshot())]))
+  #expect(await sink.blocked)
+  await sink.release()
+  try await control.value
+  await feed.drain()
+  let frames = await sink.frames
+  let messages = try frames.map {
+    try #require(JSONSerialization.jsonObject(with: $0) as? [String: Any])
+  }
+  #expect(messages.count == 2)
+  #expect(messages.last?["method"] as? String == "operation.finished")
+  let params = try #require(messages.last?["params"] as? [String: Any])
+  let progress = try JSONDecoder().decode(
+    InstallationProgress.self,
+    from: JSONSerialization.data(withJSONObject: try #require(params["progress"])))
+  #expect(progress.metrics.downloadedChunks == 10_000)
+}
+
+@Test
 func testTransferRPCReplyPriority() async throws {
   let sink = RPCBatchTestSink()
   let watchdog = Task {
@@ -1526,6 +1649,8 @@ func testTransferRPCTransports(transport: String) async throws {
 func testTransferRPCSessionSettings() async throws {
   let defaults = try RPCCLI.parse([])
   #expect(defaults.manifestCacheDir == nil && defaults.logFile == nil && defaults.logLevel == .info)
+  #expect(!defaults.progressSnapshotsOnly)
+  #expect(try RPCCLI.parse(["--progress-snapshots-only"]).progressSnapshotsOnly)
   #expect(try RPCSessionSettings().logger == nil)
   for level in ["trace", "debug", "info", "notice", "warning", "error", "critical"] {
     #expect(try RPCCLI.parse(["--log-level", level]).logLevel.rawValue == level)

@@ -155,6 +155,19 @@ const unsubscribe = client.onProgressBatch(batch => {
 });
 ```
 
+For a launcher that only renders aggregate progress, start stdio RPC with `--progress-snapshots-only`:
+
+```ts
+const client = await SophonRpcClient.stdio("/path/to/SophonCLI", ["--progress-snapshots-only"]);
+const unsubscribe = client.onProgress(({ operationID, kind, progress }) => {
+  updateProgressDisplay(progress); // phase, outcome, timing, percentages, rates, ETA, and counters
+});
+```
+
+This optional mode sends `operation.progress` at most once every 250 ms per operation and omits `events` entirely. It never subscribes to raw reporter events. There is one pending/in-flight notification per operation; its snapshot is read when the writer selects it, so stale snapshots do not accumulate. After a slow write, the next progress message waits another 250 ms rather than catching up in a burst. Completion/failure/cancellation bypass the timer: a queued progress message becomes `operation.finished`, or a final message is sent immediately after an in-flight write. Physical transport waits can still delay delivery; `status()` and `wait()` remain independent.
+
+`onProgress()` receives both notification modes. `onProgressBatch()` receives only raw-event batches. Snapshots include the stage and all numeric metrics; current filenames and retry reasons require the default raw-event mode. HTTP still uses polling and is unaffected by this flag. The default stdio event mode is unchanged.
+
 Events use Swift's tagged-enum encoding, for example `{ "chunkDownloaded": { "chunkID": "id", "bytes": 1024 } }`. Unlabelled associated values use `_0`, such as `{ "phaseChanged": { "_0": "scanning" } }`. `onNotification()` still receives the same batch notification; `onProgressBatch()` adds typed filtering. Synchronous and asynchronous listener failures are isolated from transport errors. `onNotificationError` can report UI exceptions without closing the client. The Node and Neutralino adapters share this behavior; HTTP remains status polling without raw event delivery.
 
 The collector and reporter never wait for transport delivery. A slow client can grow the intentionally unbounded RAM event backlog; the file-cache memory limit does not cap that queue. There is no disk event spool or overflow dropping. Encoding and writes run in the sender, with RPC replies prioritized before its next notification write.
