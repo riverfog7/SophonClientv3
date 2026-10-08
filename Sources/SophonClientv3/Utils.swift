@@ -175,7 +175,8 @@ func readDownloadBlacklist(_ config: GameLaunchConfig, baseGameDir: URL) throws 
     URL(fileURLWithPath: config.exeFileName).deletingPathExtension().lastPathComponent.lowercased()
     + "_data"
   var ignoredFiles: Set<String> = []
-  for (index, line) in contents.split(separator: "\n", omittingEmptySubsequences: false)
+  for (index, line) in contents.split(
+    omittingEmptySubsequences: false, whereSeparator: \.isNewline)
     .enumerated()
   {
     let line = line.trimmingCharacters(in: .whitespacesAndNewlines)
