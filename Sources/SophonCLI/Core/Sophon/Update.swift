@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import HYPAPIClient
+import Logging
 import SophonClientv3
 
 extension StorageIOPolicy: ExpressibleByArgument {}
@@ -236,7 +237,7 @@ struct UpdateStateCLI: AsyncParsableCommand {
 
 func makeOperationClient(
   game: String, directory: String, cn: Bool, transfer: TransferSettings,
-  downloads: Int = 8, writes: Int = 4
+  downloads: Int = 8, writes: Int = 4, manifestCacheDir: String? = nil, logger: Logger? = nil
 ) async throws -> SophonClientv3 {
   let api = HYPAPIClientManager.shared.getClient(isCN: cn)
   let config = try resolveHYPGame(game, in: await api.getGameConfigs())
@@ -248,10 +249,12 @@ func makeOperationClient(
     sophonBaseURL: cn ? SOPHON_API_CN_BASE_URL : SOPHON_API_OS_BASE_URL,
     launcherID: cn ? HYPAPI_CN_LAUNCHER_ID : HYPAPI_OS_LAUNCHER_ID,
     gameID: config.game.id,
-    manifestCacheDir: manifests.appendingPathComponent("SophonClientv3/manifests").path,
+    manifestCacheDir: manifestCacheDir
+      ?? manifests.appendingPathComponent("SophonClientv3/manifests").path,
     logStdout: false, maxCocurrentDownloads: downloads, maxCocurrentWrites: writes,
     transfer: transfer)
-  return try await SophonClientv3(settings, baseGameDir: URL(fileURLWithPath: directory))
+  return try await SophonClientv3(
+    settings, baseGameDir: URL(fileURLWithPath: directory), logger: logger)
 }
 
 private actor UpdateDashboard {

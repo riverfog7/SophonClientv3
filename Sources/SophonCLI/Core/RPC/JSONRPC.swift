@@ -122,6 +122,7 @@ private struct RPCStateParameters: Decodable {
 
 actor RPCDispatcher {
   private(set) var stopping = false
+  private let settings: RPCSessionSettings
   private let notify: (@Sendable (RPCNotification) async throws -> Void)?
   private var operations: [String: Task<Void, Never>] = [:]
   private var status: [String: JSONValue] = [:]
@@ -131,7 +132,12 @@ actor RPCDispatcher {
   private var directories: [String: String] = [:]
   private var completed: [String] = []
 
-  init(notify: (@Sendable (RPCNotification) async throws -> Void)? = nil) { self.notify = notify }
+  init(
+    settings: RPCSessionSettings, notify: (@Sendable (RPCNotification) async throws -> Void)? = nil
+  ) {
+    self.settings = settings
+    self.notify = notify
+  }
 
   func handle(_ data: Data) async -> Data? {
     let value: JSONValue
@@ -187,6 +193,7 @@ actor RPCDispatcher {
   }
 
   private func dispatch(_ method: String, params: JSONValue) async throws -> JSONValue {
+    settings.logger?.debug("RPC request", metadata: ["method": "\(method)"])
     switch method {
     case "rpc.discover":
       return .object([
@@ -370,7 +377,8 @@ actor RPCDispatcher {
   private func client(_ params: RPCOperationParameters) async throws -> SophonClientv3 {
     try await makeOperationClient(
       game: params.game, directory: params.directory, cn: params.cn,
-      transfer: params.transfer, downloads: params.downloads, writes: params.writes)
+      transfer: params.transfer, downloads: params.downloads, writes: params.writes,
+      manifestCacheDir: settings.manifestCacheDir, logger: settings.logger)
   }
 
   private func api(_ method: String, params: JSONValue) async throws -> JSONValue {

@@ -23,7 +23,7 @@ public final class SophonClientv3: @unchecked Sendable {
 
   public init(
     _ settings: SophonClientSettings,
-    baseGameDir: URL
+    baseGameDir: URL, logger: Logger? = nil
   )
     async throws
   {
@@ -40,14 +40,14 @@ public final class SophonClientv3: @unchecked Sendable {
     }
     self.transferSettings = transferSettings
     var puppy = Puppy()
-    if settings.logStdout {
+    if logger == nil, settings.logStdout {
       puppy.add(
         ConsoleLogger(
           "SophonClientv3.stdout",
           logFormat: SophonLogFormat(),
         ))
     }
-    if let path = settings.logFile {
+    if logger == nil, let path = settings.logFile {
       puppy.add(
         try FileLogger(
           "SophonClientv3.file",
@@ -57,14 +57,16 @@ public final class SophonClientv3: @unchecked Sendable {
       )
     }
     self.puppy = puppy
-    self.logger = Logger(label: "SophonClientv3") { [puppy] label in
-      guard !puppy.loggers.isEmpty else {
-        return SwiftLogNoOpLogHandler()
+    self.logger =
+      logger
+      ?? Logger(label: "SophonClientv3") { [puppy] label in
+        guard !puppy.loggers.isEmpty else {
+          return SwiftLogNoOpLogHandler()
+        }
+        var handler = PuppyLogHandler(label: label, puppy: puppy)
+        handler.logLevel = settings.logLevel
+        return handler
       }
-      var handler = PuppyLogHandler(label: label, puppy: puppy)
-      handler.logLevel = settings.logLevel
-      return handler
-    }
     self.manifestManager = try await CachedManifestManager(
       baseURL: settings.baseURL, sophonBaseURL: settings.sophonBaseURL,
       launcherID: settings.launcherID, gameID: settings.gameID,

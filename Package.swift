@@ -50,6 +50,7 @@ let package = Package(
       name: "SophonCLI",
       dependencies: [
         .product(name: "ArgumentParser", package: "swift-argument-parser"),
+        .product(name: "Logging", package: "swift-log"),
         .product(name: "Yams", package: "Yams"),
         .product(name: "NIOCore", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio"),

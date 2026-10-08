@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import Logging
 import NIOCore
 import NIOHTTP1
 import NIOPosix
@@ -7,6 +8,68 @@ import NIOPosix
 enum RPCTransport: String, CaseIterable, ExpressibleByArgument {
   case stdio
   case http
+}
+
+struct RPCSessionSettings: Sendable {
+  let manifestCacheDir: String?
+  let logger: Logger?
+
+  init(manifestCacheDir: String? = nil, logFile: String? = nil, logLevel: Logger.Level = .info)
+    throws
+  {
+    self.manifestCacheDir = manifestCacheDir.map {
+      URL(fileURLWithPath: $0).standardizedFileURL.path
+    }
+    if let directory = self.manifestCacheDir {
+      try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+    }
+    if let logFile {
+      let url = URL(fileURLWithPath: logFile).standardizedFileURL.resolvingSymlinksInPath()
+      try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+      if !FileManager.default.fileExists(atPath: url.path) {
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+          throw ValidationError("Cannot create RPC log file at \(url.path)")
+        }
+      }
+      guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+        throw ValidationError("RPC log destination must be a regular file")
+      }
+      let stream = RPCLogStream(handle: try FileHandle(forWritingTo: url))
+      logger = Logger(label: "SophonRPC") { label in
+        var handler = StreamLogHandler(label: label, stream: stream)
+        handler.logLevel = logLevel
+        return handler
+      }
+    } else {
+      logger = nil
+    }
+  }
+}
+
+// Every operation shares this stream. Writes are synchronous, so shutdown has no log backlog.
+final class RPCLogStream: TextOutputStream, @unchecked Sendable {
+  private let lock = NSLock()
+  private let handle: FileHandle
+  private var failed = false
+
+  init(handle: FileHandle) { self.handle = handle }
+
+  func write(_ string: String) {
+    lock.withLock {
+      guard !failed else { return }
+      do {
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(string.utf8))
+      } catch {
+        failed = true
+        try? FileHandle.standardError.write(
+          contentsOf: Data("RPC file logging failed: \(error.localizedDescription)\n".utf8))
+      }
+    }
+  }
+
+  deinit { try? handle.close() }
 }
 
 struct RPCCLI: AsyncParsableCommand {
@@ -18,10 +81,26 @@ struct RPCCLI: AsyncParsableCommand {
   @Option(help: "Optional bearer token required by the HTTP transport.") var token: String?
   @Option(help: "Browser origin permitted by HTTP CORS; repeat for additional origins.")
   var allowOrigin: [String] = []
+  @Option(help: "Manifest cache directory for all operations in this RPC process.")
+  var manifestCacheDir: String?
+  @Option(help: "Append RPC and operation logs to this file; omit to disable logging.")
+  var logFile: String?
+  @Option(
+    help: "Log level: trace, debug, info, notice, warning, error, critical.",
+    transform: { value in
+      guard let level = Logger.Level(rawValue: value) else {
+        throw ValidationError("Invalid log level: \(value)")
+      }
+      return level
+    })
+  var logLevel: Logger.Level = .info
 
   mutating func validate() throws {
     guard (0...65535).contains(port) else {
       throw ValidationError("Port must be between 0 and 65535")
+    }
+    guard [manifestCacheDir, logFile].compactMap({ $0 }).allSatisfy({ !$0.isEmpty }) else {
+      throw ValidationError("Manifest cache and log file paths must not be empty")
     }
     guard
       allowOrigin.allSatisfy({
@@ -33,9 +112,14 @@ struct RPCCLI: AsyncParsableCommand {
   }
 
   mutating func run() async throws {
+    let settings = try RPCSessionSettings(
+      manifestCacheDir: manifestCacheDir, logFile: logFile, logLevel: logLevel)
+    settings.logger?.info("RPC server started", metadata: ["transport": "\(transport.rawValue)"])
     let writer = RPCOutput()
     if transport == .stdio {
-      let dispatcher = RPCDispatcher { value in try await writer.sendNotification(value) }
+      let dispatcher = RPCDispatcher(settings: settings) { value in
+        try await writer.sendNotification(value)
+      }
       let input = RPCInput()
       let interrupts = InstallInterrupts {
         input.stop()
@@ -83,7 +167,8 @@ struct RPCCLI: AsyncParsableCommand {
       withExtendedLifetime(interrupts) {}
     } else {
       try await serveHTTP(
-        port: port, token: token, allowedOrigins: Set(allowOrigin), writer: writer)
+        port: port, token: token, allowedOrigins: Set(allowOrigin), writer: writer,
+        settings: settings)
     }
   }
 }
@@ -296,9 +381,10 @@ private final class RPCInput: @unchecked Sendable {
 }
 
 private func serveHTTP(
-  port: Int, token: String?, allowedOrigins: Set<String>, writer: RPCOutput
+  port: Int, token: String?, allowedOrigins: Set<String>, writer: RPCOutput,
+  settings: RPCSessionSettings
 ) async throws {
-  let dispatcher = RPCDispatcher()
+  let dispatcher = RPCDispatcher(settings: settings)
   let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
   let shutdown = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
   do {

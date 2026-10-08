@@ -3,10 +3,13 @@ import HYPAPIClient
 import Testing
 
 @testable import enum SophonCLI.JSONValue
+@testable import struct SophonCLI.RPCCLI
 @testable import class SophonCLI.RPCEventBuffer
+@testable import class SophonCLI.RPCLogStream
 @testable import struct SophonCLI.RPCNotification
 @testable import class SophonCLI.RPCOutput
 @testable import class SophonCLI.RPCProgressFeed
+@testable import struct SophonCLI.RPCSessionSettings
 @testable import SophonClientv3
 
 #if canImport(FoundationNetworking)
@@ -1444,8 +1447,15 @@ func testTransferRPCUpdateEventEncoding() async throws {
 
 @Test(arguments: ["stdio", "http"])
 func testTransferRPCTransports(transport: String) async throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let manifests = root.appendingPathComponent("manifest cache")
+  let logFile = root.appendingPathComponent("logs/rpc log.txt")
+  let settings = [
+    "--manifest-cache-dir", manifests.path, "--log-file", logFile.path, "--log-level", "debug",
+  ]
   let child = try TransferRPCProcess(
-    transport == "http" ? ["--transport", "http", "--token", "fixture-token"] : [])
+    settings + (transport == "http" ? ["--transport", "http", "--token", "fixture-token"] : []))
   let timeout = Task {
     do {
       try await Task.sleep(for: .seconds(10))
@@ -1506,6 +1516,63 @@ func testTransferRPCTransports(transport: String) async throws {
   }
   try await runTransferIO { child.process.waitUntilExit() }
   #expect(child.process.terminationStatus == 0)
+  #expect(FileManager.default.fileExists(atPath: manifests.path))
+  let logs = try String(contentsOf: logFile, encoding: .utf8)
+  #expect(logs.contains("RPC server started") && logs.contains("RPC request"))
+  #expect(logs.contains("transport=\(transport)") && logs.contains("method=rpc.discover"))
+}
+
+@Test
+func testTransferRPCSessionSettings() async throws {
+  let defaults = try RPCCLI.parse([])
+  #expect(defaults.manifestCacheDir == nil && defaults.logFile == nil && defaults.logLevel == .info)
+  #expect(try RPCSessionSettings().logger == nil)
+  for level in ["trace", "debug", "info", "notice", "warning", "error", "critical"] {
+    #expect(try RPCCLI.parse(["--log-level", level]).logLevel.rawValue == level)
+  }
+  for arguments in [
+    ["--log-level", "invalid"], ["--log-file", ""], ["--manifest-cache-dir", ""],
+  ] {
+    #expect(throws: (any Error).self) {
+      var command = try RPCCLI.parse(arguments)
+      try command.validate()
+    }
+  }
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let file = root.appendingPathComponent("session log.txt")
+  try Data("existing contents\n".utf8).write(to: file)
+  let session = try RPCSessionSettings(logFile: file.path, logLevel: .warning)
+  let logger = try #require(session.logger)
+  logger.debug("filtered debug")
+  logger.info("filtered info")
+  await withTaskGroup(of: Void.self) { group in
+    for index in 0..<100 {
+      group.addTask {
+        var operationLogger = logger
+        operationLogger[metadataKey: "operation.id"] = "\(index)"
+        operationLogger.warning("append \(index)")
+      }
+    }
+  }
+  let contents = try String(contentsOf: file, encoding: .utf8)
+  #expect(contents.hasPrefix("existing contents\n"))
+  #expect(!contents.contains("filtered"))
+  #expect(contents.split(separator: "\n").count == 101)
+  for index in 0..<100 { #expect(contents.contains("operation.id=\(index) ")) }
+  let handle = try FileHandle(forWritingTo: file)
+  try handle.close()
+  let broken = RPCLogStream(handle: handle)
+  broken.write("cannot write to a closed file\n")
+  broken.write("further writes are disabled\n")
+  #expect(try String(contentsOf: file, encoding: .utf8) == contents)
+  // File-open failure exits before any RPC/plain-text stdout is emitted.
+  let child = try TransferRPCProcess(["--log-file", root.path])
+  defer { child.stop() }
+  try await runTransferIO { child.process.waitUntilExit() }
+  #expect(child.process.terminationStatus != 0)
+  #expect((try child.output.fileHandleForReading.readToEnd() ?? Data()).isEmpty)
 }
 
 func testManifestContents(_ manifest: Manifest) {
