@@ -212,6 +212,7 @@ struct InstallCLI: AsyncParsableCommand, Sendable {
       let client = try await SophonClientv3(settings, baseGameDir: URL(fileURLWithPath: directory))
       try Task.checkCancellation()
       let reporter = client.makeInstallationReporter()
+      await dashboard.attach(reporter)
       let subscription = await reporter.subscribe()
       // Own this consumer explicitly so cancelling installation does not discard its final events.
       let consumer = Task {
@@ -241,63 +242,6 @@ struct InstallCLI: AsyncParsableCommand, Sendable {
   }
 }
 
-// Each meter measures completed work, not in-flight network traffic or physical device activity.
-struct InstallMeter {
-  var value: UInt64 = 0
-  var total: UInt64?
-  var started: Double = 0
-  var ended: Double?
-  private var samples: [(time: Double, value: UInt64)] = [(0, 0)]
-
-  var done: Bool { total.map { value >= $0 } ?? false }
-
-  mutating func start(at time: Double) {
-    started = time
-    ended = done ? time : nil
-    samples = [(time, value)]
-  }
-
-  mutating func setTotal(_ total: UInt64, at time: Double) {
-    self.total = total
-    if done { finish(at: time) }
-  }
-
-  mutating func advance(_ bytes: UInt64, at time: Double) {
-    value += bytes
-    if done { finish(at: time) }
-  }
-
-  mutating func sample(at time: Double) {
-    guard ended == nil else { return }
-    while samples.count > 1 && samples[1].time <= time - 5 { samples.removeFirst() }
-    if samples.last?.time == time { samples.removeLast() }
-    samples.append((time, value))
-    // Also bound memory for unusually small user-specified refresh intervals.
-    if samples.count > 256 { samples.removeFirst(samples.count - 256) }
-  }
-
-  mutating func finish(at time: Double) {
-    guard ended == nil else { return }
-    sample(at: time)
-    ended = time
-  }
-
-  func rate(at time: Double) -> Double? {
-    guard let first = samples.first else { return nil }
-    let interval = (ended ?? time) - first.time
-    guard interval >= 0.25 else { return nil }
-    return Double(value - first.value) / interval
-  }
-
-  func eta(at time: Double) -> Double? {
-    if done { return 0 }
-    guard ended == nil, let total, let rate = rate(at: time), rate > 0 else { return nil }
-    return Double(total - value) / rate
-  }
-
-  func elapsed(at time: Double) -> Double { max(0, (ended ?? time) - started) }
-}
-
 struct InstallFrame: Sendable {
   let lines: [String]
   let force: Bool
@@ -310,33 +254,13 @@ private actor InstallDashboard {
   private let plain: Bool
   private let frames: AsyncStream<InstallFrame>.Continuation
   private let origin = ContinuousClock.now
-  private var phase: InstallationPhase = .metadata
-  private var phaseStart: Double = 0
-  private var durations: [InstallationPhase: Double] = [:]
-  private var ended: Double?
-  private var outcome: InstallationOutcome?
+  private var reporter: InstallationReporter?
+  private var progress = InstallationProgress()
+  private var result: InstallationOutcome?
   private var cancelling = false
   private var lastFrame: Double = -.infinity
-  private var manifests = InstallMeter()
-  private var scan = InstallMeter()
-  private var reads = InstallMeter()
-  private var trims = InstallMeter()
-  private var downloads = InstallMeter()
-  private var processing = InstallMeter()
-  private var writes = InstallMeter()
-  private var scanChunks: UInt64 = 0
-  private var totalScanChunks: Int?
-  private var scannedFiles = 0
-  private var totalFiles: Int?
-  private var missingFiles = 0
-  private var brokenFiles = 0
-  private var trimFiles: UInt64 = 0
-  private var completedFiles = 0
-  private var downloadedChunks = 0
-  private var processedBytes: UInt64 = 0
-  private var retries = 0
   private var latest = "Loading game configuration and branches"
-  private var notices: [String] = []
+  private var notice: String?
 
   init(
     title: String, directory: String, cache: String, plain: Bool,
@@ -349,256 +273,184 @@ private actor InstallDashboard {
     self.frames = frames
   }
 
-  private var now: Double {
-    let elapsed = origin.duration(to: .now).components
-    return Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
-  }
+  func attach(_ reporter: InstallationReporter) { self.reporter = reporter }
 
-  func record(_ event: InstallationEvent) {
-    guard outcome == nil else { return }
-    let time = now
+  func record(_ event: InstallationEvent) async {
     switch event {
-    case .metadataPlanned(let total):
-      manifests.start(at: time)
-      manifests.setTotal(UInt64(total), at: time)
-    case .manifestPulled(let field, let predownload):
-      manifests.advance(1, at: time)
-      latest = "Loaded manifest \(field)\(predownload ? " (predownload)" : "")"
-    case .scanPlanned(let files, let chunks, let bytes):
-      totalFiles = files
-      totalScanChunks = chunks
-      scan.setTotal(bytes, at: time)
-    case .fileMissing(let path, let count, let bytes):
-      missingFiles += 1
-      scanChunks += UInt64(count)
-      scan.advance(bytes, at: time)
-      latest = "Missing: \(path.path)"
-    case .fileChunkScanned(let path, _, let broken, _, let bytes, let expected):
-      scanChunks += 1
-      scan.advance(expected, at: time)
-      reads.advance(bytes, at: time)
+    case .manifestPulled(let field, _): latest = "Loaded manifest \(field)"
+    case .fileMissing(let path, _, _): latest = "Missing: \(path.path)"
+    case .fileChunkScanned(let path, _, let broken, _, _, _):
       latest = "\(broken ? "Damaged chunk" : "Checked"): \(path.path)"
-    case .fileScanned(let path, let broken, let needsTrimming):
-      scannedFiles += 1
-      if broken { brokenFiles += 1 }
-      if needsTrimming { trimFiles += 1 }
-      latest = "Scanned: \(path.path)"
-    case .planned(let downloadBytes, let writeBytes, let chunks, let files):
-      downloads.setTotal(downloadBytes, at: time)
-      writes.setTotal(writeBytes, at: time)
-      processing.setTotal(UInt64(chunks), at: time)
-      totalFiles = files
-    case .fileTrimmed(let path):
-      trims.advance(1, at: time)
-      latest = "Trimmed: \(path.path)"
-    case .chunkDownloaded(let id, let bytes):
-      downloads.advance(bytes, at: time)
-      downloadedChunks += 1
-      latest = "Downloaded: \(id)"
+    case .fileScanned(let path, _, _): latest = "Scanned: \(path.path)"
+    case .fileTrimmed(let path): latest = "Trimmed: \(path.path)"
+    case .chunkDownloaded(let id, _): latest = "Downloaded: \(id)"
+    case .chunkPostProcessed(let id, _, _): latest = "Processed: \(id)"
+    case .chunkWritten(let path, _, _, _): latest = "Wrote: \(path.path)"
+    case .fileCompleted(let path): latest = "Completed: \(path.path)"
     case .retryScheduled(let id, let attempt, let reason):
-      retries += 1
-      notices.append(installText("Retry \(attempt) for \(id): \(reason)", limit: 160))
-      if notices.count > 5 { notices.removeFirst() }
-      latest = notices.last ?? "Retry scheduled"
-    case .chunkPostProcessed(let id, _, let bytes):
-      processing.advance(1, at: time)
-      processedBytes += bytes
-      latest = "Processed: \(id)"
-    case .chunkWritten(let path, _, _, let bytes):
-      writes.advance(bytes, at: time)
-      latest = "Wrote: \(path.path)"
-    case .fileCompleted(let path):
-      completedFiles += 1
-      latest = "Completed: \(path.path)"
-    case .phaseChanged(let next):
-      guard next != phase else { return }
-      durations[phase] = time - phaseStart
-      switch phase {
-      case .metadata: manifests.finish(at: time)
-      case .scanning:
-        scan.finish(at: time)
-        reads.finish(at: time)
-      case .trimming: trims.finish(at: time)
-      case .running: break
-      }
-      phase = next
-      phaseStart = time
-      switch next {
-      case .metadata: manifests.start(at: time)
-      case .scanning:
-        scan.start(at: time)
-        reads.start(at: time)
-      case .trimming:
-        trims.setTotal(trimFiles, at: time)
-        trims.start(at: time)
-      case .running:
-        downloads.start(at: time)
-        processing.start(at: time)
-        writes.start(at: time)
-      }
-      latest = "Starting \(installPhaseName(next).lowercased())"
-      refresh(force: true)
-    case .finished(let result):
-      finish(result, at: time)
+      notice = "Retry \(attempt) for \(id): \(reason)"
+    case .phaseChanged: await refresh(force: true)
+    default: break
     }
   }
 
-  func requestCancellation() {
-    guard outcome == nil else { return }
+  func requestCancellation() async {
     cancelling = true
-    refresh(force: true)
+    await refresh(force: true)
   }
 
-  func refresh(force: Bool = false) {
-    guard outcome == nil else { return }
-    let time = now
-    sample(at: time)
+  func refresh(force: Bool = false) async {
+    guard result == nil else { return }
+    if let reporter { progress = await reporter.snapshot() }
+    let time = installClockSeconds(origin)
     guard force || !plain || time - lastFrame >= 1 else { return }
     lastFrame = time
     frames.yield(InstallFrame(lines: lines(at: time), force: force))
   }
 
-  func complete(_ result: InstallationOutcome) {
-    if outcome == nil { finish(result, at: now) }
-    frames.yield(InstallFrame(lines: lines(at: ended ?? now), force: true))
-  }
-
-  private func finish(_ result: InstallationOutcome, at time: Double) {
-    outcome = result
-    ended = time
-    durations[phase] = time - phaseStart
-    manifests.finish(at: time)
-    scan.finish(at: time)
-    reads.finish(at: time)
-    trims.finish(at: time)
-    downloads.finish(at: time)
-    processing.finish(at: time)
-    writes.finish(at: time)
-  }
-
-  private func sample(at time: Double) {
-    manifests.sample(at: time)
-    scan.sample(at: time)
-    reads.sample(at: time)
-    trims.sample(at: time)
-    downloads.sample(at: time)
-    processing.sample(at: time)
-    writes.sample(at: time)
-  }
-
-  private func stageETA(at time: Double) -> Double? {
-    switch phase {
-    case .metadata: return manifests.eta(at: time)
-    case .scanning: return scan.eta(at: time)
-    case .trimming: return trims.eta(at: time)
-    case .running:
-      let estimates = [downloads, processing, writes].map { $0.eta(at: time) }
-      guard estimates.allSatisfy({ $0 != nil }) else { return nil }
-      return estimates.compactMap { $0 }.max()
-    }
+  func complete(_ outcome: InstallationOutcome) async {
+    if let reporter { progress = await reporter.snapshot() }
+    result = outcome
+    frames.yield(InstallFrame(lines: lines(at: installClockSeconds(origin)), force: true))
   }
 
   private func lines(at time: Double) -> [String] {
-    let status: String
-    switch outcome {
-    case .completed?: status = "COMPLETED"
-    case .cancelled?: status = "CANCELLED"
-    case .failed?: status = "FAILED"
-    case nil: status = cancelling ? "CANCELLING..." : installPhaseName(phase).uppercased()
-    }
+    let metrics = progress.metrics
+    let common = metrics.common
+    let status = installStatus(
+      result ?? progress.outcome, phase: installPhaseName(progress.phase), cancelling: cancelling)
     var lines = [
-      "  SOPHON / INSTALL",
-      "  \(installText(title, limit: 70))",
-      "  Target  \(installText(directory, limit: 65))",
-      "",
-      "  \(status)",
-      "  Stage \(installDuration(time - phaseStart))   Total \(installDuration(time))   ETA \(installDuration(stageETA(at: time)))",
+      "  SOPHON / INSTALL", "  \(installText(title, limit: 70))",
+      "  Target  \(installText(directory, limit: 65))", "", "  \(status)",
+      "  Stage \(installDuration(common.timing.stageElapsedSeconds))   Total \(installDuration(common.timing.elapsedSeconds))   ETA \(installDuration(common.timing.etaSeconds))",
       "",
     ]
-    switch phase {
+    switch progress.phase {
     case .metadata:
       lines += [
-        progressRow("Manifests", manifests, at: time),
-        "  Loaded  \(manifests.value) / \(manifests.total.map(String.init) ?? "—") manifests",
+        installMetricRow("Manifests", common.metadata.manifests, at: time, plain: plain),
+        "  Loaded  \(common.metadata.manifests.completed) / \(common.metadata.manifests.total.map(String.init) ?? "—") manifests",
+        installMetricRow("Planning", common.metadata.planning, at: time, plain: plain),
         "  Cache   \(installText(cache, limit: 65))",
       ]
     case .scanning:
+      let scan = metrics.verification
       lines += [
-        progressRow("Verify", scan, at: time),
-        "  Assessed  \(installBytes(Double(scan.value))) / \(scan.total.map { installBytes(Double($0)) } ?? "—")",
-        "",
-        "  Chunks  \(scanChunks) / \(totalScanChunks.map(String.init) ?? "—")   Files  \(scannedFiles) / \(totalFiles.map(String.init) ?? "—")",
-        "  Missing \(missingFiles)   Needing repair \(brokenFiles)",
+        installMetricRow("Verify", scan.bytes, at: time, plain: plain),
+        "  Assessed  \(installMetricBytes(scan.bytes))", "",
+        "  Chunks  \(scan.chunks.completed) / \(scan.chunks.total.map(String.init) ?? "—")   Files  \(scan.files.completed) / \(scan.files.total.map(String.init) ?? "—")",
+        "  Missing \(scan.missingFiles)   Needing repair \(scan.brokenFiles)",
       ]
     case .trimming:
       lines += [
-        progressRow("Trim", trims, at: time), "  Trimmed  \(trims.value) / \(trimFiles) files",
+        installMetricRow("Trim", metrics.trimming, at: time, plain: plain),
+        "  Trimmed  \(metrics.trimming.completed) / \(metrics.trimming.total.map(String.init) ?? "—") files",
       ]
     case .running:
-      lines += byteRow("Download", downloads, at: time)
+      lines += installByteRows(
+        "Download", metrics.download, at: time, plain: plain, rate: common.network.rate)
       lines += [
-        "",
-        progressRow("Process", processing, at: time),
-        "  \(installColumn("\(processing.value) / \(processing.total.map(String.init) ?? "—") chunks"))\(installBytes(Double(processedBytes)))",
-        "  Elapsed \(installDuration(processing.elapsed(at: time)))   ETA \(installDuration(processing.eta(at: time)))",
+        "", installMetricRow("Process", metrics.processing.chunks, at: time, plain: plain),
+        "  \(metrics.processing.chunks.completed) / \(metrics.processing.chunks.total.map(String.init) ?? "—") chunks   \(installBytes(Double(metrics.processing.bytes)))",
+        "  Elapsed \(installDuration(metrics.processing.chunks.elapsedSeconds))   ETA \(installDuration(metrics.processing.chunks.etaSeconds))",
         "",
       ]
-      lines += byteRow("Write", writes, at: time)
+      lines += installByteRows(
+        "Write", common.write, at: time, plain: plain, rate: common.write.rate)
     }
-    // Keep verification reads visible after the pipeline moves on to downloads and writes.
     lines += [
       "",
-      "  Read  \(installColumn(installBytes(Double(reads.value)), width: 20))\(installSpeed(reads.rate(at: time)))\(reads.ended != nil ? "  (last rate)" : "")",
+      "  Read  \(installColumn(installBytes(Double(common.read.completed)), width: 20))\(installSpeed(common.read.rate))\(common.read.isFinished ? "  (last rate)" : "")",
     ]
-    if phase == .running {
+    if progress.phase == .running {
       lines.append(
-        "  Files \(completedFiles) / \(totalFiles.map(String.init) ?? "—")   Downloaded chunks \(downloadedChunks)   Retries \(retries)"
+        "  Files \(common.files.completed) / \(common.files.total.map(String.init) ?? "—")   Downloaded chunks \(metrics.downloadedChunks)   Retries \(metrics.retries)"
       )
     }
-    if let outcome {
+    lines += installResourceRows(common.resources)
+    if let outcome = result ?? progress.outcome {
       if case .failed(let reason) = outcome {
         lines.append("  Error  \(installText(reason, limit: 500))")
       }
       lines.append(
-        "  Assessed \(installBytes(Double(scan.value))) (\(scanChunks) chunks)   Downloaded \(installBytes(Double(downloads.value)))   Written \(installBytes(Double(writes.value)))"
+        "  Assessed \(installBytes(Double(metrics.verification.bytes.completed))) (\(metrics.verification.chunks.completed) chunks)   Downloaded \(installBytes(Double(metrics.download.completed)))   Written \(installBytes(Double(common.write.completed)))"
       )
       lines.append(
         "  "
           + [InstallationPhase.metadata, .scanning, .trimming, .running].compactMap { phase in
-            durations[phase].map {
-              "\(phase == .scanning ? "Verify" : installPhaseName(phase)) \(installDuration($0))"
+            common.timing.phaseDurations[phase.rawValue].map {
+              "\(installPhaseName(phase)) \(installDuration($0))"
             }
           }.joined(separator: " | "))
     } else {
       lines.append("  Latest  \(installText(latest, limit: 65))")
-      if let notice = notices.last { lines.append("  \(installText(notice, limit: 72))") }
+      if let notice { lines.append("  \(installText(notice, limit: 72))") }
     }
     return lines
   }
+}
 
-  private func byteRow(_ label: String, _ meter: InstallMeter, at time: Double) -> [String] {
-    [
-      progressRow(label, meter, at: time),
-      "  \(installColumn("\(installBytes(Double(meter.value))) / \(meter.total.map { installBytes(Double($0)) } ?? "—")"))\(installSpeed(meter.rate(at: time)))",
-      "  Elapsed \(installDuration(meter.elapsed(at: time)))   ETA \(installDuration(meter.eta(at: time)))",
-    ]
-  }
+func installClockSeconds(_ origin: ContinuousClock.Instant) -> Double {
+  let value = origin.duration(to: .now).components
+  return Double(value.seconds) + Double(value.attoseconds) / 1e18
+}
 
-  private func progressRow(_ label: String, _ meter: InstallMeter, at time: Double) -> String {
-    "  \(installColumn(label, width: 12))\(installBar(meter.value, meter.total, at: time, unicode: !plain))  \(installPercent(meter.value, meter.total))"
+func installStatus(_ outcome: InstallationOutcome?, phase: String, cancelling: Bool) -> String {
+  switch outcome {
+  case .completed?: return "COMPLETED"
+  case .cancelled?: return "CANCELLED"
+  case .failed?: return "FAILED"
+  case nil: return cancelling ? "CANCELLING..." : phase.uppercased()
   }
+}
+
+func installMetricRow(_ label: String, _ metric: SophonMetric, at time: Double, plain: Bool)
+  -> String
+{
+  "  \(installColumn(label, width: 12))\(installBar(metric.percentage, at: time, unicode: !plain))  \(metric.percentage.map { String(format: "%.1f%%", locale: Locale(identifier: "en_US_POSIX"), $0) } ?? "—")"
+}
+
+func installMetricBytes(_ metric: SophonMetric) -> String {
+  "\(installBytes(Double(metric.completed))) / \(metric.total.map { installBytes(Double($0)) } ?? "—")"
+}
+
+func installByteRows(
+  _ label: String, _ metric: SophonMetric, at time: Double, plain: Bool, rate: Double?,
+  average: Bool = false
+) -> [String] {
+  [
+    installMetricRow(label, metric, at: time, plain: plain),
+    "  \(installColumn(installMetricBytes(metric)))\(average ? "Avg " : "")\(installSpeed(rate))",
+    "  Elapsed \(installDuration(metric.elapsedSeconds))   ETA \(installDuration(metric.etaSeconds))",
+  ]
+}
+
+func installResourceRows(_ resources: SophonResourceMetrics?) -> [String] {
+  guard let resources else { return [] }
+  var lines = [
+    "  RAM cache \(installBytes(Double(resources.memoryBytes))) / \(installBytes(Double(resources.memoryLimit)))   Spill reserved \(installBytes(Double(resources.diskReservedBytes))) / \(installBytes(Double(resources.diskLimit)))"
+  ]
+  for device in resources.devices {
+    lines.append(
+      "  Storage \(installText(device.location, limit: 25)) [\(device.roles.joined(separator: "+"))]   Cache \(installBytes(Double(device.cacheBytes)))"
+    )
+    lines.append(
+      "  Read \(installBytes(Double(device.read.completed))) \(installSpeed(device.read.rate))   Write \(installBytes(Double(device.write.completed))) \(installSpeed(device.write.rate))"
+    )
+  }
+  return lines
 }
 
 func installColumn(_ text: String, width: Int = 38) -> String {
   text + String(repeating: " ", count: max(2, width - text.count))
 }
 
-func installBar(_ value: UInt64, _ total: UInt64?, at time: Double, unicode: Bool) -> String {
+func installBar(_ percentage: Double?, at time: Double, unicode: Bool) -> String {
   let width = 28
   let fill = unicode ? "█" : "="
   let empty = unicode ? "░" : "-"
-  if let total {
-    let fraction = total == 0 ? 1 : min(1, Double(value) / Double(total))
+  if let percentage {
+    let fraction = min(1, percentage / 100)
     let filled = Int(fraction * Double(width))
     return "[" + String(repeating: fill, count: filled)
       + String(repeating: empty, count: width - filled) + "]"
@@ -634,12 +486,6 @@ func installBytes(_ bytes: Double) -> String {
 func installSpeed(_ rate: Double?) -> String {
   guard let rate, rate.isFinite else { return "—" }
   return installBytes(rate) + "/s"
-}
-
-func installPercent(_ value: UInt64, _ total: UInt64?) -> String {
-  guard let total else { return "—" }
-  let percent = total == 0 ? 100 : min(100, Double(value) / Double(total) * 100)
-  return String(format: "%.1f%%", locale: Locale(identifier: "en_US_POSIX"), percent)
 }
 
 func installDuration(_ value: Double?) -> String {

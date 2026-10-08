@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(FoundationNetworking)
-  import FoundationNetworking
-#endif
-
 public enum InstallationPhase: String, Codable, Sendable {
   case metadata
   case scanning
@@ -19,6 +15,8 @@ public enum InstallationOutcome: Codable, Sendable {
 
 public enum InstallationEvent: Encodable, Sendable {
   // metadata stage
+  case planningStarted
+  case planningCompleted
   case metadataPlanned(totalManifests: Int)
   case manifestPulled(matchingField: String, predownload: Bool)
 
@@ -48,14 +46,7 @@ public enum InstallationEvent: Encodable, Sendable {
 
 public struct InstallationProgress: BaseProgress, Codable {
   public internal(set) var phase: InstallationPhase = .metadata
-  public internal(set) var totalDownloadBytes: UInt64?
-  public internal(set) var totalWriteBytes: UInt64?
-  public internal(set) var totalChunk: Int?
-  public internal(set) var totalFile: Int?
-  public internal(set) var downloadedBytes: UInt64 = 0
-  public internal(set) var writtenBytes: UInt64 = 0
-  public internal(set) var scannedFiles: Int = 0
-  public internal(set) var completedFiles: Int = 0
-  public internal(set) var completedChunks: Int = 0
   public internal(set) var outcome: InstallationOutcome?
+  public internal(set) var metrics = InstallationMetrics()
+  public init() {}
 }

@@ -117,7 +117,7 @@ public final class SophonClientv3: @unchecked Sendable {
 
   public func planUpdate(
     sourceVersion: String? = nil, mode: GameBranchCategoryScenario = .full,
-    predownload: Bool = false
+    predownload: Bool = false, reporter: UpdateReporter? = nil
   ) async throws -> UpdatePlan {
     guard gameLaunchConfig.enableLdiff else {
       throw SophonClientError.UnsupportedManifestConfiguration(
@@ -136,11 +136,16 @@ public final class SophonClientv3: @unchecked Sendable {
     }
     let fields = try await getRequiredMatchingFields(
       mode: mode, predownload: predownload, selectedBranch: branch)
+    await reporter?.record(
+      .metadataPlanned(installationManifests: fields.count, diffManifests: fields.count))
     let infos = try await manifestManager.getUpdateInfos(
-      matchingFields: fields, branch: branch)
-    return try updater.makePlan(
+      matchingFields: fields, branch: branch, reporter: reporter)
+    await reporter?.record(.planningStarted)
+    let plan = try updater.makePlan(
       sourceVersion: sourceVersion, targetVersion: branch.tag,
       installInfos: infos.install, updateInfos: infos.update)
+    await reporter?.record(.planningCompleted)
+    return plan
   }
 
   public func update(
@@ -179,7 +184,7 @@ public final class SophonClientv3: @unchecked Sendable {
             "Reconcile the unfinished update using the installation manifest")
         }
         plan = try await planUpdate(
-          sourceVersion: detectedSource, mode: mode, predownload: predownload)
+          sourceVersion: detectedSource, mode: mode, predownload: predownload, reporter: reporter)
       }
       try await updater.execute(
         plan, settings: transferSettings,
@@ -584,6 +589,9 @@ public final class SophonClientv3: @unchecked Sendable {
     await reporter.record(.metadataPlanned(totalManifests: matchingFields.count))
     let infos = try await manifestManager.getInstallInfos(
       matchingFields: matchingFields, branch: branch, predownload: predownload, reporter: reporter)
-    return try await installer.scan(installInfos: infos, reporter: reporter)
+    await reporter.record(.planningStarted)
+    let plan = try await installer.scan(installInfos: infos, reporter: reporter)
+    await reporter.record(.planningCompleted)
+    return plan
   }
 }

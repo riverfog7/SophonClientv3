@@ -159,6 +159,7 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
         downloads: maxConcurrentDownloads, writes: maxConcurrentWrites)
       try Task.checkCancellation()
       let reporter = client.makeUpdateReporter()
+      await dashboard.attach(reporter)
       let subscription = await reporter.subscribe()
       let progress = Task {
         for await event in subscription.events { await dashboard.record(event) }
@@ -262,32 +263,13 @@ private actor UpdateDashboard {
   private let plain: Bool
   private let frames: AsyncStream<InstallFrame>.Continuation
   private let origin = ContinuousClock.now
-  private var phase: UpdatePhase = .metadata
-  private var phaseStart: Double = 0
-  private var ended: Double?
-  private var outcome: UpdateOutcome?
+  private var reporter: UpdateReporter?
+  private var progress = UpdateProgress()
+  private var result: UpdateOutcome?
   private var cancelling = false
   private var lastFrame: Double = -.infinity
-  private var version = "Resolving source and target versions"
   private var latest = "Loading game configuration and branches"
   private var currentFile: String?
-  private var downloads = InstallMeter()
-  private var network = InstallMeter()
-  private var patchNetwork = InstallMeter()
-  private var resources: TransferResourceProgress?
-  private var deviceReads: [String: InstallMeter] = [:]
-  private var deviceWrites: [String: InstallMeter] = [:]
-  private var verifiedPatchBytes: UInt64 = 0
-  private var files = InstallMeter()
-  private var writes = InstallMeter()
-  private var repairDownloads = InstallMeter()
-  private var repairWrites = InstallMeter()
-  private var deletions = InstallMeter()
-  private var bundles = 0
-  private var skipped = 0
-  private var repairFiles = 0
-  private var deletedBytes: UInt64 = 0
-  private var totalDeleteBytes: UInt64 = 0
 
   init(
     title: String, directory: String, cacheAt: String?, writeMode: UpdateWriteMode,
@@ -302,234 +284,116 @@ private actor UpdateDashboard {
     self.frames = frames
   }
 
-  private var now: Double {
-    let elapsed = origin.duration(to: .now).components
-    return Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
-  }
+  func attach(_ reporter: UpdateReporter) { self.reporter = reporter }
 
-  func record(_ event: UpdateEvent) {
-    guard outcome == nil else { return }
-    let time = now
+  func record(_ event: UpdateEvent) async {
     switch event {
-    case .planned(
-      let source, let target, let patchBytes, let outputBytes, let count, let deletes, let bytes):
-      version = "\(source) -> \(target)"
-      downloads.setTotal(patchBytes, at: time)
-      files.setTotal(UInt64(count), at: time)
-      writes.setTotal(outputBytes, at: time)
-      deletions.setTotal(UInt64(deletes), at: time)
-      totalDeleteBytes = bytes
-    case .bundleDownloaded(let id, let bytes):
-      bundles += 1
-      verifiedPatchBytes += bytes
-      latest = "Bundle ready: \(id)"
-    case .patchDownloadsPlanned(let bytes):
-      downloads.setTotal(bytes, at: time)
-    case .resourcesUpdated(let progress):
-      resources = progress
-      downloads.value = progress.receivedBytes
-      patchNetwork.value = progress.transferredBytes
-      network.value = progress.downloads.reduce(0) { $0 + $1.transferredBytes }
-      patchNetwork.sample(at: time)
-      network.sample(at: time)
-      for device in progress.devices {
-        var reads = deviceReads[device.id] ?? InstallMeter()
-        var writes = deviceWrites[device.id] ?? InstallMeter()
-        reads.value = device.readBytes
-        writes.value = device.writtenBytes
-        reads.sample(at: time)
-        writes.sample(at: time)
-        deviceReads[device.id] = reads
-        deviceWrites[device.id] = writes
-      }
-    case .fileStarted(let path):
-      currentFile = fileName(path)
+    case .fileStarted(let path): currentFile = fileName(path)
+    case .fileCompleted(let path, _, let skipped):
+      currentFile = nil
+      latest = "\(skipped ? "Already updated" : "Verified"): \(fileName(path))"
     case .fileNeedsRepair(let path):
-      repairFiles += 1
       currentFile = nil
       latest = "Queued for repair: \(fileName(path))"
-    case .fileCompleted(let path, let bytes, let wasSkipped):
-      files.advance(1, at: time)
-      if wasSkipped {
-        skipped += 1
-        if let total = writes.total { writes.setTotal(total - min(total, bytes), at: time) }
-      } else {
-        writes.advance(bytes, at: time)
-      }
-      if currentFile == fileName(path) { currentFile = nil }
-      latest = "\(wasSkipped ? "Already updated" : "Verified"): \(fileName(path))"
-    case .fileCached(let path):
-      files.advance(1, at: time)
-      latest = "Cached patch: \(fileName(path))"
-    case .repairPlanned(let downloadBytes, let writeBytes):
-      repairDownloads.setTotal(downloadBytes, at: time)
-      repairWrites.setTotal(writeBytes, at: time)
-      repairDownloads.start(at: time)
-      repairWrites.start(at: time)
-    case .repairDownloaded(let bytes):
-      repairDownloads.advance(bytes, at: time)
-    case .repairWritten(let bytes):
-      repairWrites.advance(bytes, at: time)
-    case .fileDeleted(let path, let bytes):
-      deletions.advance(1, at: time)
-      deletedBytes += bytes
-      latest = "Delete entry complete: \(fileName(path))"
-    case .phaseChanged(let next):
-      guard next != phase else { return }
-      phase = next
-      phaseStart = time
-      if next == .running || next == .caching {
-        downloads.start(at: time)
-        patchNetwork.start(at: time)
-        network.start(at: time)
-        files.start(at: time)
-        writes.start(at: time)
-      }
-      refresh(force: true)
-    case .finished(let result): finish(result, at: time)
+    case .fileCached(let path): latest = "Cached patch: \(fileName(path))"
+    case .fileDeleted(let path, _): latest = "Delete entry complete: \(fileName(path))"
+    case .bundleDownloaded(let id, _): latest = "Bundle ready: \(id)"
+    case .manifestPulled(let kind, let field): latest = "Loaded \(kind) manifest \(field)"
+    case .phaseChanged: await refresh(force: true)
+    default: break
     }
   }
 
-  func requestCancellation() {
-    guard outcome == nil else { return }
+  func requestCancellation() async {
     cancelling = true
-    refresh(force: true)
+    await refresh(force: true)
   }
 
-  func refresh(force: Bool = false) {
-    guard outcome == nil else { return }
-    let time = now
+  func refresh(force: Bool = false) async {
+    guard result == nil else { return }
+    if let reporter { progress = await reporter.snapshot() }
+    let time = installClockSeconds(origin)
     guard force || !plain || time - lastFrame >= 1 else { return }
     lastFrame = time
     frames.yield(InstallFrame(lines: lines(at: time), force: force))
   }
 
-  func complete(_ result: UpdateOutcome) {
-    if outcome == nil { finish(result, at: now) }
-    frames.yield(InstallFrame(lines: lines(at: ended ?? now), force: true))
-  }
-
-  private func finish(_ result: UpdateOutcome, at time: Double) {
-    outcome = result
-    ended = time
-    if case .completed = result {
-      // Recovery can skip whole bundles whose targets were already completed.
-      downloads.setTotal(downloads.value, at: time)
-    }
-    downloads.finish(at: time)
-    patchNetwork.finish(at: time)
-    network.finish(at: time)
-    for id in deviceReads.keys { deviceReads[id]?.finish(at: time) }
-    for id in deviceWrites.keys { deviceWrites[id]?.finish(at: time) }
-    files.finish(at: time)
-    writes.finish(at: time)
-    repairDownloads.finish(at: time)
-    repairWrites.finish(at: time)
-    deletions.finish(at: time)
-  }
-
-  private func average(_ meter: InstallMeter, at time: Double) -> Double? {
-    let elapsed = meter.elapsed(at: time)
-    return elapsed >= 0.25 ? Double(meter.value) / elapsed : nil
-  }
-
-  private func eta(_ meter: InstallMeter, at time: Double) -> Double? {
-    if meter.done { return 0 }
-    guard let total = meter.total, let rate = average(meter, at: time), rate > 0 else { return nil }
-    return Double(total - meter.value) / rate
+  func complete(_ outcome: UpdateOutcome) async {
+    if let reporter { progress = await reporter.snapshot() }
+    result = outcome
+    frames.yield(InstallFrame(lines: lines(at: installClockSeconds(origin)), force: true))
   }
 
   private func lines(at time: Double) -> [String] {
+    let m = progress.metrics
+    let common = m.common
     let status: String
-    switch outcome {
+    switch result ?? progress.outcome {
     case .completed?: status = "COMPLETED"
     case .cancelled?: status = "CANCELLED"
     case .failed?: status = "FAILED"
-    case nil: status = cancelling ? "CANCELLING..." : phase.rawValue.uppercased()
+    case nil: status = cancelling ? "CANCELLING..." : progress.phase.rawValue.uppercased()
     }
-    let patchRemaining = (downloads.total ?? 0) - min(downloads.total ?? 0, downloads.value)
-    let patchRate = patchNetwork.rate(at: time)
-    let patchETA: Double? =
-      downloads.done ? 0 : patchRate.flatMap { $0 > 0 ? Double(patchRemaining) / $0 : nil }
-    let estimates = [patchETA, eta(files, at: time)]
-    let remaining = estimates.allSatisfy { $0 != nil } ? estimates.compactMap { $0 }.max() : nil
+    let version =
+      progress.sourceVersion.flatMap { source in progress.targetVersion.map { "\(source) -> \($0)" }
+      } ?? "Resolving source and target versions"
     var lines = [
-      "  SOPHON / UPDATE",
-      "  \(installText(title, limit: 70))",
+      "  SOPHON / UPDATE", "  \(installText(title, limit: 70))",
       "  Target  \(installText(directory, limit: 65))",
       cacheAt.map { "  Cache at  \(installText($0, limit: 63))" }
         ?? "  Output  \(writeMode == .inPlace ? "In-place" : "Temporary replacement") | \(ioPolicy == .serialized ? "Sequential" : "Parallel") I/O",
-      "  Version  \(installText(version, limit: 65))",
-      "  \(status)",
-      "  Stage \(installDuration(time - phaseStart))   Total \(installDuration(time))   ETA \(installDuration(remaining))",
+      "  Version  \(installText(version, limit: 65))", "  \(status)",
+      "  Stage \(installDuration(common.timing.stageElapsedSeconds))   Total \(installDuration(common.timing.elapsedSeconds))   ETA \(installDuration(common.timing.etaSeconds))",
     ]
-    if phase == .repairing || repairDownloads.total != nil {
+    if progress.phase == .metadata {
+      lines += [
+        installMetricRow("Manifests", common.metadata.manifests, at: time, plain: plain),
+        "  Install \(common.metadata.installationManifests.completed) / \(common.metadata.installationManifests.total.map(String.init) ?? "—")   Diff \(common.metadata.diffManifests.completed) / \(common.metadata.diffManifests.total.map(String.init) ?? "—")",
+        installMetricRow("Planning", common.metadata.planning, at: time, plain: plain),
+      ]
+    }
+    if progress.phase == .repairing || m.repair.download.total != nil {
       lines.append(
-        "  Patch data verified  \(installBytes(Double(verifiedPatchBytes))) (\(bundles) bundles)")
-      lines += byteRows("Repair data", repairDownloads, at: time)
-      lines += byteRows("Repair write", repairWrites, at: time)
+        "  Patch data verified  \(installBytes(Double(m.patch.verifiedBytes))) (\(m.patch.bundlesReady) bundles)"
+      )
+      lines += installByteRows(
+        "Repair data", m.repair.download, at: time, plain: plain,
+        rate: m.repair.download.averageRate, average: true)
+      lines += installByteRows(
+        "Repair write", m.repair.write, at: time, plain: plain, rate: m.repair.write.averageRate,
+        average: true)
     } else {
-      lines.append(progressRow("Patch data", downloads, at: time))
-      lines.append(
-        "  \(installBytes(Double(downloads.value))) / \(downloads.total.map { installBytes(Double($0)) } ?? "—") received   Net \(installSpeed(patchRate))"
-      )
-      lines.append(
-        "  Remaining \(installBytes(Double(patchRemaining)))   Retained \(installBytes(Double(resources?.retainedBytes ?? 0)))"
-      )
-      lines.append(
-        "  Verified \(installBytes(Double(verifiedPatchBytes)))   Bundles ready \(bundles)")
+      lines += [
+        installMetricRow("Patch data", m.patch.data, at: time, plain: plain),
+        "  \(installMetricBytes(m.patch.data)) received   Net \(installSpeed(m.patch.network.rate))",
+        "  Remaining \(installBytes(Double(m.patch.data.remaining ?? 0)))   Retained \(installBytes(Double(m.patch.retainedBytes)))",
+        "  Verified \(installBytes(Double(m.patch.verifiedBytes)))   Bundles ready \(m.patch.bundlesReady)",
+      ]
     }
     lines += [
-      progressRow(cacheAt == nil ? "Files" : "Cached files", files, at: time),
-      "  \(files.value) / \(files.total.map(String.init) ?? "—") files   Skipped \(skipped)   Repair \(repairFiles)",
+      installMetricRow(
+        cacheAt == nil ? "Files" : "Cached files", common.files, at: time, plain: plain),
+      "  \(common.files.completed) / \(common.files.total.map(String.init) ?? "—") files   Skipped \(m.skippedFiles)   Repair \(m.repair.files)",
     ]
     if cacheAt == nil {
-      if phase == .repairing || repairDownloads.total != nil {
-        lines.append("  Verified output  \(installBytes(Double(writes.value)))")
-      } else {
-        lines += byteRows("Output", writes, at: time)
-      }
+      lines += installByteRows(
+        "Output", common.write, at: time, plain: plain, rate: common.write.averageRate,
+        average: true)
       lines.append(
-        "  Delete entries  \(deletions.value) / \(deletions.total.map(String.init) ?? "—")   Planned \(installBytes(Double(totalDeleteBytes)))   Removed \(installBytes(Double(deletedBytes)))"
+        "  Delete entries  \(m.deletion.files.completed) / \(m.deletion.files.total.map(String.init) ?? "—")   Planned \(installBytes(Double(m.deletion.bytes.total ?? 0)))   Removed \(installBytes(Double(m.deletion.bytes.completed)))"
       )
     }
     lines.append(
-      "  Network \(installBytes(Double(network.value))) new bytes   \(installSpeed(network.rate(at: time)))"
+      "  Network \(installBytes(Double(common.network.completed))) new bytes   \(installSpeed(common.network.rate))"
     )
-    if let resources {
-      let reserved = resources.devices.reduce(UInt64(0)) { $0 + $1.reservedCacheBytes }
-      lines.append(
-        "  RAM cache \(installBytes(Double(resources.memoryBytes))) / \(installBytes(Double(resources.memoryLimit)))"
-          + (cacheAt == nil
-            ? "   Spill reserved \(installBytes(Double(reserved))) / \(installBytes(Double(resources.diskLimit)))"
-            : ""))
-      for device in resources.devices {
-        lines.append(
-          "  Storage \(installText(device.location, limit: 25)) [\(device.roles.joined(separator: "+"))]   Cache \(installBytes(Double(device.cacheBytes)))"
-        )
-        lines.append(
-          "  Read \(installBytes(Double(device.readBytes))) \(installSpeed(deviceReads[device.id]?.rate(at: time)))   Write \(installBytes(Double(device.writtenBytes))) \(installSpeed(deviceWrites[device.id]?.rate(at: time)))"
-        )
-      }
-    }
+    lines += installResourceRows(common.resources)
     lines.append(
       "  \(currentFile == nil ? "Latest" : "File")  \(installText(currentFile ?? latest, limit: 65))"
     )
-    if case .failed(let reason)? = outcome {
+    if case .failed(let reason)? = result ?? progress.outcome {
       lines.append("  Error  \(installText(reason, limit: 500))")
     }
     return lines
-  }
-
-  private func progressRow(_ label: String, _ meter: InstallMeter, at time: Double) -> String {
-    "  \(installColumn(label, width: 12))\(installBar(meter.value, meter.total, at: time, unicode: !plain))  \(installPercent(meter.value, meter.total))"
-  }
-
-  private func byteRows(_ label: String, _ meter: InstallMeter, at time: Double) -> [String] {
-    [
-      progressRow(label, meter, at: time),
-      "  \(installColumn("\(installBytes(Double(meter.value))) / \(meter.total.map { installBytes(Double($0)) } ?? "—")"))Avg \(installSpeed(average(meter, at: time)))",
-    ]
   }
 
   private func fileName(_ file: URL) -> String {

@@ -23,10 +23,6 @@ internal protocol OperationReportingInternal: OperationReporting {
 }
 
 extension OperationReportingInternal {
-  public func snapshot() -> Progress {
-    progress
-  }
-
   public func subscribe() -> (
     id: UUID,
     progress: Progress,
@@ -49,7 +45,7 @@ extension OperationReportingInternal {
       pair.continuation.finish()
     }
 
-    return (id, progress, pair.stream)
+    return (id, snapshot(), pair.stream)
   }
 
   public func unsubscribe(_ id: UUID) {

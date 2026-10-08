@@ -6,44 +6,38 @@ import Foundation
   import Glibc
 #endif
 
-public struct DownloadByteProgress: Codable, Sendable {
-  public let id: String
-  public let category: String
-  public let totalBytes: UInt64
-  public var receivedBytes: UInt64
-  public var retainedBytes: UInt64
-  public var transferredBytes: UInt64
+struct StorageByteProgress: Sendable {
+  let id: String
+  let location: String
+  var roles: [String]
+  var readBytes: UInt64 = 0
+  var writtenBytes: UInt64 = 0
+  var cacheBytes: UInt64 = 0
+  var reservedCacheBytes: UInt64 = 0
 }
 
-public struct StorageByteProgress: Codable, Sendable {
-  public let id: String
-  public let location: String
-  public var roles: [String]
-  public var readBytes: UInt64 = 0
-  public var writtenBytes: UInt64 = 0
-  public var cacheBytes: UInt64 = 0
-  public var reservedCacheBytes: UInt64 = 0
+struct TransferDownloadTotals: Sendable {
+  var receivedBytes: UInt64 = 0
+  var retainedBytes: UInt64 = 0
+  var transferredBytes: UInt64 = 0
 }
 
-public struct TransferResourceProgress: Codable, Sendable {
-  public let memoryBytes: UInt64
-  public let memoryLimit: UInt64
-  public let diskLimit: UInt64
-  public let devices: [StorageByteProgress]
-  public let downloads: [DownloadByteProgress]
+struct TransferResourceProgress: Sendable {
+  let memoryBytes: UInt64
+  let memoryLimit: UInt64
+  let diskLimit: UInt64
+  let devices: [StorageByteProgress]
+  let downloads: [DownloadByteProgress]
 
-  public var receivedBytes: UInt64 {
-    downloads.filter { $0.category == "patch" }.reduce(0) { $0 + $1.receivedBytes }
-  }
-  public var retainedBytes: UInt64 {
-    downloads.filter { $0.category == "patch" }.reduce(0) { $0 + $1.retainedBytes }
-  }
-  public var transferredBytes: UInt64 {
-    downloads.filter { $0.category == "patch" }.reduce(0) { $0 + $1.transferredBytes }
-  }
+  let downloadTotals: [String: TransferDownloadTotals]
+
+  var receivedBytes: UInt64 { downloadTotals["patch"]?.receivedBytes ?? 0 }
+  var retainedBytes: UInt64 { downloadTotals["patch"]?.retainedBytes ?? 0 }
+  var transferredBytes: UInt64 { downloadTotals["patch"]?.transferredBytes ?? 0 }
+
 }
 
-// I/O callbacks only update counters. One periodic publisher forwards snapshots to the reporter.
+// I/O callbacks update live counters. Reporters read them on demand without a publishing timer.
 final class TransferTelemetry: @unchecked Sendable {
   private let lock = NSLock()
   private let memoryLimit: UInt64
@@ -52,6 +46,8 @@ final class TransferTelemetry: @unchecked Sendable {
   private var devices: [String: StorageByteProgress] = [:]
   private var locations: [String: String] = [:]
   private var downloads: [String: DownloadByteProgress] = [:]
+  private var patchIDs: Set<String> = []
+  private var downloadTotals: [String: TransferDownloadTotals] = [:]
 
   init(memoryLimit: UInt64, diskLimit: UInt64) {
     self.memoryLimit = memoryLimit
@@ -114,33 +110,54 @@ final class TransferTelemetry: @unchecked Sendable {
     }
   }
 
+  // Called under the lock; aggregate updates avoid scanning every installation chunk.
+  private func storeDownload(_ value: DownloadByteProgress) {
+    if let old = downloads[value.id] {
+      downloadTotals[old.category]!.receivedBytes -= old.receivedBytes
+      downloadTotals[old.category]!.retainedBytes -= old.retainedBytes
+    }
+    downloads[value.id] = value
+    downloadTotals[value.category, default: TransferDownloadTotals()].receivedBytes +=
+      value.receivedBytes
+    downloadTotals[value.category]!.retainedBytes += value.retainedBytes
+    if value.category == "patch" { patchIDs.insert(value.id) } else { patchIDs.remove(value.id) }
+  }
+
   func planDownload(_ id: String, size: UInt64, retained: UInt64, category: String = "patch") {
     lock.withLock {
-      downloads[id] = DownloadByteProgress(
-        id: id, category: category, totalBytes: size, receivedBytes: min(size, retained),
-        retainedBytes: min(size, retained), transferredBytes: 0)
+      storeDownload(
+        DownloadByteProgress(
+          id: id, category: category, totalBytes: size, receivedBytes: min(size, retained),
+          retainedBytes: min(size, retained),
+          transferredBytes: downloads[id]?.category == category
+            ? downloads[id]!.transferredBytes : 0))
     }
   }
 
   func receive(_ bytes: UInt64, committed: UInt64, id: String) {
     lock.withLock {
-      downloads[id]?.transferredBytes += bytes
-      if let total = downloads[id]?.totalBytes {
-        downloads[id]?.receivedBytes = min(total, committed)
-      }
+      guard var value = downloads[id] else { return }
+      value.transferredBytes += bytes
+      value.receivedBytes = min(value.totalBytes, committed)
+      downloadTotals[value.category]!.transferredBytes += bytes
+      storeDownload(value)
     }
   }
 
   func resetDownload(_ id: String) {
     lock.withLock {
-      downloads[id]?.receivedBytes = 0
-      downloads[id]?.retainedBytes = 0
+      guard var value = downloads[id] else { return }
+      value.receivedBytes = 0
+      value.retainedBytes = 0
+      storeDownload(value)
     }
   }
 
   func ready(_ id: String) {
     lock.withLock {
-      if let total = downloads[id]?.totalBytes { downloads[id]?.receivedBytes = total }
+      guard var value = downloads[id] else { return }
+      value.receivedBytes = value.totalBytes
+      storeDownload(value)
     }
   }
 
@@ -149,7 +166,8 @@ final class TransferTelemetry: @unchecked Sendable {
       TransferResourceProgress(
         memoryBytes: memoryBytes, memoryLimit: memoryLimit, diskLimit: diskLimit,
         devices: devices.values.sorted { $0.id < $1.id },
-        downloads: downloads.values.sorted { $0.id < $1.id })
+        downloads: patchIDs.compactMap { downloads[$0] }.sorted { $0.id < $1.id },
+        downloadTotals: downloadTotals)
     }
   }
 

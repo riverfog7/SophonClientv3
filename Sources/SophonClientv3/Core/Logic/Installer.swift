@@ -341,6 +341,7 @@ final class Installer: Sendable {
         settings: transferSettings, gameDirectory: baseGameDir, operation: "install",
         transport: transport)
     }
+    await reporter?.useResources(workspace.telemetry)
     if providedWorkspace == nil {
       try await workspace.retainOnlyDownloads(
         plan.requiredChunks.map { try $0.downloadRequest() })

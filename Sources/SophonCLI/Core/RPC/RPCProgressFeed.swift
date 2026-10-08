@@ -59,6 +59,8 @@ final class RPCEventBuffer<Event: Sendable>: @unchecked Sendable {
   var finalStatus: JSONValue? { lock.withLock { terminal } }
   var hasEvents: Bool { lock.withLock { head < events.count } }
 
+  func refresh() { signal.yield(()) }
+
   func finish(_ status: JSONValue) {
     let finished = lock.withLock {
       guard accepting else { return false }
@@ -94,6 +96,7 @@ where Reporter.Event: Encodable, Reporter.Progress: Encodable {
   private let buffer: RPCEventBuffer<Reporter.Event>
   private let collector: Task<Void, Never>
   private let sender: Task<Void, Never>
+  private let sampler: Task<Void, Never>
 
   init(
     reporter: Reporter, operationID: String, kind: String,
@@ -110,10 +113,18 @@ where Reporter.Event: Encodable, Reporter.Progress: Encodable {
       for await event in subscription.events { buffer.append(event) }
     }
     self.collector = collector
+    let sampler = Task.detached {
+      while !Task.isCancelled {
+        do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+        buffer.refresh()
+      }
+    }
+    self.sampler = sampler
     sender = Task.detached {
       do {
         for await _ in buffer.wakeups {
-          while buffer.hasEvents {
+          if buffer.finalStatus != nil, !buffer.hasEvents { break }
+          repeat {
             try await send(
               RPCNotification {
                 let batch = buffer.take()
@@ -133,7 +144,7 @@ where Reporter.Event: Encodable, Reporter.Progress: Encodable {
                   "params": .object(params),
                 ])
               })
-          }
+          } while buffer.hasEvents
         }
         if let terminal = buffer.finalStatus {
           try await send(
@@ -145,6 +156,7 @@ where Reporter.Event: Encodable, Reporter.Progress: Encodable {
         }
       } catch {
         buffer.discard()
+        sampler.cancel()
         collector.cancel()
         await reporter.unsubscribe(subscription.id)
         await collector.value
@@ -154,6 +166,8 @@ where Reporter.Event: Encodable, Reporter.Progress: Encodable {
   }
 
   func finish(_ status: JSONValue) async {
+    sampler.cancel()
+    await sampler.value
     await reporter.unsubscribe(subscriptionID)
     await collector.value
     buffer.finish(status)

@@ -198,7 +198,9 @@ final class CachedManifestManager: Sendable {
     return (manifest, sophonPatchManifestInfo.diffDownload)
   }
 
-  internal func getUpdateInfos(matchingFields: Set<String>, branch: GameSubBranch) async throws -> (
+  internal func getUpdateInfos(
+    matchingFields: Set<String>, branch: GameSubBranch, reporter: UpdateReporter? = nil
+  ) async throws -> (
     install: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
     update: [(manifest: DiffManifest, diffDownloadInfo: SophonDownloadInfo)]
   ) {
@@ -215,8 +217,10 @@ final class CachedManifestManager: Sendable {
         group.addTask { [self] in
           let installation: Manifest = try await _getManifest(
             manifest: installInfo.manifest, downloadInfo: installInfo.manifestDownload)
+          await reporter?.record(.manifestPulled(kind: "install", matchingField: field))
           let update: DiffManifest = try await _getManifest(
             manifest: updateInfo.manifest, downloadInfo: updateInfo.manifestDownload)
+          await reporter?.record(.manifestPulled(kind: "diff", matchingField: field))
           return (installation, installInfo.chunkDownload, update, updateInfo.diffDownload)
         }
       }

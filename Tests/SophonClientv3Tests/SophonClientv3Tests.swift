@@ -625,11 +625,11 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   #expect(!FileManager.default.fileExists(atPath: deletion.fileURL.path))
   #expect(try await SophonClientv3.savedUpdateState(at: root, settings: settings)?.finished == true)
   let appliedProgress = await patched.snapshot()
-  #expect(appliedProgress.writtenBytes == UInt64(fixture.new.count))
-  #expect(appliedProgress.totalDeleteFiles == 1)
-  #expect(appliedProgress.processedDeleteFiles == 1)
-  #expect(appliedProgress.totalDeleteBytes == 4)
-  #expect(appliedProgress.deletedBytes == 4)
+  #expect(appliedProgress.metrics.common.write.completed == UInt64(fixture.new.count))
+  #expect(appliedProgress.metrics.deletion.files.total == 1)
+  #expect(appliedProgress.metrics.deletion.files.completed == 1)
+  #expect(appliedProgress.metrics.deletion.bytes.total == 4)
+  #expect(appliedProgress.metrics.deletion.bytes.completed == 4)
 
   // Only the updated target falls back to installation when its source is broken.
   try Data(repeating: 0x00, count: fixture.old.count).write(to: target.fileURL)
@@ -650,19 +650,27 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   try await updater.execute(
     plan, settings: settings, downloadCache: cache, installer: installer, reporter: repaired)
   #expect(try Data(contentsOf: target.fileURL) == fixture.new)
-  #expect(await repaired.snapshot().repairFiles == (rawPayload ? 0 : 1))
+  #expect(await repaired.snapshot().metrics.repair.files == (rawPayload ? 0 : 1))
   let repairProgress = await repaired.snapshot()
-  #expect(repairProgress.repairDownloadedBytes == (rawPayload ? 0 : UInt64(fixture.new.count)))
-  #expect(repairProgress.repairWrittenBytes == (rawPayload ? 0 : UInt64(fixture.new.count)))
-  #expect(repairProgress.totalRepairDownloadBytes == repairProgress.repairDownloadedBytes)
-  #expect(repairProgress.totalRepairWriteBytes == repairProgress.repairWrittenBytes)
+  #expect(
+    repairProgress.metrics.repair.download.completed == (rawPayload ? 0 : UInt64(fixture.new.count))
+  )
+  #expect(
+    repairProgress.metrics.repair.write.completed == (rawPayload ? 0 : UInt64(fixture.new.count)))
+  #expect(
+    repairProgress.metrics.repair.download.total
+      == (rawPayload ? nil : repairProgress.metrics.repair.download.completed)
+  )
+  #expect(
+    repairProgress.metrics.repair.write.total
+      == (rawPayload ? nil : repairProgress.metrics.repair.write.completed))
   #expect(installFixture.observed == (rawPayload ? [] : [true]))
   #expect(!FileManager.default.fileExists(atPath: deletion.fileURL.path))
 
   let skipped = UpdateReporter(logger: .init(label: "test"))
   try await updater.execute(
     plan, settings: settings, downloadCache: cache, installer: installer, reporter: skipped)
-  #expect(await skipped.snapshot().skippedFiles == 1)
+  #expect(await skipped.snapshot().metrics.skippedFiles == 1)
   #expect(bundleFixture.ranges.count == 1)
 }
 
@@ -734,21 +742,23 @@ func testTransferLiveUpdate(scenario: String) async throws {
   try await updater.execute(
     plan, settings: settings, downloadCache: cache, installer: installer, reporter: reporter)
   let progress = await reporter.snapshot()
-  #expect(progress.completedFiles == plan.installFiles.count)
-  #expect(progress.repairFiles == 0)
+  #expect(progress.metrics.common.files.completed == UInt64(plan.installFiles.count))
+  #expect(progress.metrics.repair.files == 0)
   #expect(
-    progress.skippedFiles
+    progress.metrics.skippedFiles
       == (scenario == "mixed" || scenario == "all-current" || scenario == "finalization-failed"
         ? 1 : 0))
   #expect(network.ranges.count == (scenario == "all-current" ? 0 : 1))
   #expect(
-    progress.totalPatchBytes
+    progress.metrics.patch.data.total
       == (scenario == "all-current" || scenario == "finalization-failed"
         ? 0 : UInt64(bundleBytes.count)))
-  #expect(progress.remainingPatchBytes == 0)
-  #expect(progress.resources?.memoryBytes == 0)
+  #expect(progress.metrics.patch.data.remaining == 0)
+  #expect(progress.metrics.common.resources?.memoryBytes == 0)
   #expect(
-    progress.resources?.devices.allSatisfy { $0.cacheBytes == 0 && $0.reservedCacheBytes == 0 }
+    progress.metrics.common.resources?.devices.allSatisfy {
+      $0.cacheBytes == 0 && $0.reservedCacheBytes == 0
+    }
       == true)
   #expect(
     !FileManager.default.fileExists(
@@ -756,9 +766,9 @@ func testTransferLiveUpdate(scenario: String) async throws {
         .path))
   for target in plan.installFiles { #expect(try Data(contentsOf: target.fileURL) == fixture.new) }
   if scenario == "ram" {
-    let device = try #require(progress.resources?.devices.first)
-    #expect(device.readBytes == UInt64(fixture.old.count))
-    #expect(device.writtenBytes == UInt64(fixture.new.count))
+    let device = try #require(progress.metrics.common.resources?.devices.first)
+    #expect(device.read.completed == UInt64(fixture.old.count))
+    #expect(device.write.completed == UInt64(fixture.new.count))
   }
 }
 
@@ -889,8 +899,8 @@ func testTransferInstallationCheckpoints() async throws {
   try await installer.install(remaining, reporter: reporter, journal: journal)
   try journal.complete()
   #expect(try Data(contentsOf: first.fileURL) == bytes + bytes)
-  #expect(await reporter.snapshot().scannedFiles == 0)
-  #expect(await reporter.snapshot().writtenBytes == UInt64(bytes.count))
+  #expect(await reporter.snapshot().metrics.verification.files.completed == 0)
+  #expect(await reporter.snapshot().metrics.common.write.completed == UInt64(bytes.count))
   let completed = try #require(
     try await SophonClientv3.savedInstallationState(at: root, settings: settings))
   #expect(completed.remainingPlan().requiredChunks.isEmpty)
@@ -1132,8 +1142,8 @@ func testTransferRPCEventBatches(cancelled: Bool) async throws {
   await feed.finish(terminal)
   // Reporting and completion returned while the transport remained blocked.
   #expect(await sink.blocked)
-  #expect(snapshot.completedChunks == 10_000)
-  #expect(snapshot.downloadedBytes == 10_000)
+  #expect(snapshot.metrics.downloadedChunks == 10_000)
+  #expect(snapshot.metrics.download.completed == 10_000)
   await sink.release()
   await feed.drain()
 
@@ -1146,7 +1156,7 @@ func testTransferRPCEventBatches(cancelled: Bool) async throws {
     let params = try #require(value["params"] as? [String: Any])
     #expect(params["kind"] as? String == "install")
     let events = try #require(params["events"] as? [[String: Any]])
-    #expect(!events.isEmpty && events.count <= 128)
+    #expect(events.count <= 128)
     count += events.count
     for event in events {
       if let chunk = event["chunkDownloaded"] as? [String: Any] {
@@ -1178,6 +1188,180 @@ private final class RPCEncodingProbe: Encodable, @unchecked Sendable {
 }
 
 @Test
+func testTransferMetricRates() {
+  var meter = SophonMeter()
+  meter.setTotal(1000)
+  meter.start(at: 0)
+  meter.advance(100, at: 1)
+  let first = meter.snapshot(at: 1)
+  #expect(first.completed == 100 && first.remaining == 900 && first.percentage == 10)
+  #expect(first.rate == 100 && first.averageRate == 100 && first.etaSeconds == 9)
+  // Sampling while idle ages the recent rate without changing the counters.
+  let idle = meter.snapshot(at: 7)
+  #expect(idle.completed == 100 && idle.rate == 0 && idle.etaSeconds == nil)
+  #expect(idle.averageRate == 100.0 / 7)
+  meter.advance(100, at: 8)
+  meter.finish(at: 8)
+  let stopped = meter.snapshot(at: 100)
+  #expect(stopped.elapsedSeconds == 8 && stopped.averageRate == 25)
+  #expect(stopped.isFinished && stopped.etaSeconds == nil)
+  meter.start(at: 100)
+  meter.set(50, at: 101)
+  #expect(meter.snapshot(at: 101).averageRate == nil)
+  meter.set(1000, at: 102)
+  meter.finish(at: 102)
+  let done = meter.snapshot(at: 103)
+  #expect(done.remaining == 0 && done.percentage == 100 && done.etaSeconds == 0)
+  var unplanned = SophonMeter()
+  unplanned.advance(1, at: 1)
+  #expect(unplanned.snapshot(at: 2).total == nil)
+  #expect(unplanned.snapshot(at: 2).percentage == nil)
+}
+
+@Test
+func testTransferReporterMetrics() async throws {
+  let path = FileManager.default.temporaryDirectory.appendingPathComponent("metrics.bin")
+  let install = InstallationReporter(logger: .init(label: "metrics"))
+  await install.record(.metadataPlanned(totalManifests: 2))
+  await install.record(.manifestPulled(matchingField: "game", predownload: false))
+  await install.record(.planningStarted)
+  await install.record(.phaseChanged(.scanning))
+  await install.record(.scanPlanned(totalFiles: 2, totalChunks: 3, totalBytes: 300))
+  await install.record(.fileMissing(filePath: path, chunkCount: 2, expectedBytes: 200))
+  await install.record(
+    .fileChunkScanned(
+      filePath: path, chunkID: "scan", isBroken: true, offset: 0, bytes: 80, expectedBytes: 100))
+  await install.record(.fileScanned(filePath: path, isBroken: true, needsTrimming: true))
+  let scanning = await install.snapshot().metrics
+  #expect(scanning.verification.bytes.completed == 300)
+  #expect(scanning.verification.chunks.completed == 3)
+  #expect(scanning.verification.missingFiles == 1 && scanning.verification.brokenFiles == 1)
+  #expect(scanning.common.read.completed == 80)
+  #expect(!scanning.common.metadata.planning.isFinished)
+  await install.record(.planningCompleted)
+  await install.record(.planned(downloadBytes: 100, writeBytes: 120, totalChunk: 1, totalFile: 2))
+  await install.record(.phaseChanged(.trimming))
+  await install.record(.fileTrimmed(filePath: path))
+  await install.record(.phaseChanged(.running))
+  await install.record(.chunkDownloaded(chunkID: "download", bytes: 100))
+  await install.record(.retryScheduled(chunkID: "download", attempt: 1, reason: "fixture"))
+  await install.record(
+    .chunkPostProcessed(chunkID: "download", compressed_bytes: 100, uncompressed_bytes: 120))
+  await install.record(.chunkWritten(filePath: path, chunkID: "download", offset: 0, bytes: 120))
+  await install.record(.finished(.completed))
+  let installed = await install.snapshot().metrics
+  #expect(installed.common.metadata.installationManifests.completed == 1)
+  #expect(installed.common.metadata.planning.completed == 1)
+  #expect(installed.trimming.completed == 1 && installed.trimming.isFinished)
+  #expect(installed.download.completed == 100 && installed.downloadedChunks == 1)
+  #expect(installed.processing.bytes == 120 && installed.processing.chunks.completed == 1)
+  #expect(installed.common.write.completed == 120 && installed.retries == 1)
+  #expect(installed.common.timing.phaseDurations["scanning"] != nil)
+
+  let telemetry = TransferTelemetry(memoryLimit: 1024, diskLimit: 2048)
+  let device = telemetry.register(path, role: "Target")
+  let update = UpdateReporter(logger: .init(label: "metrics"))
+  await update.useResources(telemetry)
+  await update.record(.metadataPlanned(installationManifests: 1, diffManifests: 1))
+  await update.record(.manifestPulled(kind: "install", matchingField: "game"))
+  await update.record(.manifestPulled(kind: "diff", matchingField: "game"))
+  await update.record(.planningStarted)
+  await update.record(.planningCompleted)
+  await update.record(
+    .planned(
+      sourceVersion: "1", targetVersion: "2", patchBytes: 100, installBytes: 300, totalFiles: 3,
+      deleteFiles: 1, deleteBytes: 20))
+  await update.record(.phaseChanged(.running))
+  telemetry.planDownload("patch", size: 100, retained: 40)
+  telemetry.receive(10, committed: 50, id: "patch")
+  telemetry.reserve(20, inMemory: true, device: device)
+  telemetry.reserve(30, inMemory: false, device: device)
+  telemetry.stored(10, device: device)
+  telemetry.read(12, device: device)
+  telemetry.write(18, device: device)
+  // No reporter event announces these I/O updates; the snapshot reads the live counters.
+  let live = await update.snapshot().metrics
+  #expect(live.patch.data.completed == 50 && live.patch.data.remaining == 50)
+  #expect(live.patch.network.completed == 10 && live.patch.retainedBytes == 40)
+  #expect(live.common.network.completed == 10 && live.common.read.completed == 12)
+  #expect(live.common.resources?.memoryBytes == 20)
+  #expect(live.common.resources?.diskReservedBytes == 30)
+  #expect(live.common.resources?.devices.first?.write.completed == 18)
+  #expect(live.common.resources?.devices.first?.cacheBytes == 10)
+  #expect(live.common.metadata.manifests.completed == 2)
+  #expect(live.common.metadata.diffManifests.completed == 1)
+  #expect(live.common.metadata.manifests.isFinished)
+  await update.record(.fileCompleted(fileURL: path, bytes: 100, skipped: true))
+  await update.record(.fileNeedsRepair(fileURL: path))
+  await update.record(.phaseChanged(.repairing))
+  await update.record(.repairPlanned(downloadBytes: 60, writeBytes: 100))
+  telemetry.planDownload("repair", size: 60, retained: 0, category: "install")
+  telemetry.receive(20, committed: 20, id: "repair")
+  #expect(await update.snapshot().metrics.repair.download.completed == 20)
+  await update.record(.repairWritten(bytes: 10))
+  await update.record(.finished(.cancelled))
+  let stopped = await update.snapshot()
+  #expect(stopped.metrics.common.write.total == 200)
+  #expect(stopped.metrics.common.files.completed == 1 && stopped.metrics.skippedFiles == 1)
+  #expect(stopped.metrics.repair.files == 1 && stopped.metrics.repair.write.completed == 10)
+  #expect(stopped.metrics.patch.data.etaSeconds == nil)
+  telemetry.receive(40, committed: 60, id: "repair")
+  #expect(await update.snapshot().metrics.repair.download.completed == 20)
+  let value = try #require(
+    JSONSerialization.jsonObject(with: JSONEncoder().encode(stopped)) as? [String: Any])
+  #expect(value["metrics"] != nil && value["totalPatchBytes"] == nil && value["resources"] == nil)
+  // Replanning and retry resets preserve new traffic, while retained/received bytes reflect usable data.
+  telemetry.resetDownload("patch")
+  telemetry.receive(15, committed: 15, id: "patch")
+  telemetry.planDownload("patch", size: 100, retained: 15)
+  #expect(telemetry.snapshot().transferredBytes == 25)
+  #expect(telemetry.snapshot().receivedBytes == 15 && telemetry.snapshot().retainedBytes == 15)
+  for index in 0..<1000 {
+    let id = String(index)
+    telemetry.planDownload(id, size: 1, retained: 0, category: "install")
+    telemetry.receive(1, committed: 1, id: id)
+  }
+  #expect(telemetry.snapshot().downloads.count == 1)
+  #expect(telemetry.snapshot().downloadTotals["install"]?.transferredBytes == 1060)
+}
+
+@Test
+func testTransferRPCSamplesLiveMetrics() async throws {
+  let telemetry = TransferTelemetry(memoryLimit: 1024, diskLimit: 0)
+  telemetry.planDownload("large", size: 1024, retained: 0, category: "install")
+  let reporter = InstallationReporter(logger: .init(label: "rpc-sampling"))
+  await reporter.useResources(telemetry)
+  let frames = AsyncStream<Data>.makeStream()
+  let output = RPCOutput(writeFrame: { frames.continuation.yield($0) })
+  let feed = await RPCProgressFeed(
+    reporter: reporter, operationID: "live", kind: "install",
+    status: { .object(["status": .string("running")]) },
+    send: { try await output.sendNotification($0) })
+  telemetry.receive(512, committed: 512, id: "large")
+  let watchdog = Task {
+    do {
+      try await Task.sleep(for: .seconds(5))
+      Issue.record("External RPC sampling did not publish quiet I/O")
+      frames.continuation.finish()
+    } catch {}
+  }
+  defer { watchdog.cancel() }
+  var iterator = frames.stream.makeAsyncIterator()
+  let frame = try #require(await iterator.next())
+  let value = try #require(JSONSerialization.jsonObject(with: frame) as? [String: Any])
+  let params = try #require(value["params"] as? [String: Any])
+  #expect((params["events"] as? [Any])?.isEmpty == true)
+  let progress = try JSONDecoder().decode(
+    InstallationProgress.self,
+    from: JSONSerialization.data(withJSONObject: try #require(params["progress"])))
+  #expect(progress.metrics.common.network.completed == 512)
+  #expect(progress.metrics.download.completed == 512 && progress.metrics.downloadedChunks == 0)
+  await reporter.record(.finished(.cancelled))
+  await feed.finish(.object(["status": .string("cancelled")]))
+  await feed.drain()
+}
+
+@Test
 func testTransferRPCBrokenEventWriter() async {
   let reporter = InstallationReporter(logger: .init(label: "rpc-batch-test"))
   let feed = await RPCProgressFeed(
@@ -1187,7 +1371,7 @@ func testTransferRPCBrokenEventWriter() async {
   await feed.drain()
   #expect(await reporter.subscribers.isEmpty)
   await reporter.record(.chunkDownloaded(chunkID: "after-disconnect", bytes: 42))
-  #expect(await reporter.snapshot().downloadedBytes == 42)
+  #expect(await reporter.snapshot().metrics.download.completed == 42)
   await feed.finish(.object(["operationID": .string("job"), "status": .string("completed")]))
 }
 

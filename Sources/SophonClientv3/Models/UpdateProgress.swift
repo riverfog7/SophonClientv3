@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(FoundationNetworking)
-  import FoundationNetworking
-#endif
-
 public enum UpdatePhase: String, Codable, Sendable {
   case metadata
   case caching
@@ -19,12 +15,16 @@ public enum UpdateOutcome: Codable, Sendable {
 }
 
 public enum UpdateEvent: Encodable, Sendable {
+  case metadataPlanned(installationManifests: Int, diffManifests: Int)
+  case manifestPulled(kind: String, matchingField: String)
+  case planningStarted
+  case planningCompleted
+
   case planned(
     sourceVersion: String, targetVersion: String, patchBytes: UInt64, installBytes: UInt64,
     totalFiles: Int, deleteFiles: Int, deleteBytes: UInt64)
   case bundleDownloaded(patchID: String, bytes: UInt64)
   case patchDownloadsPlanned(bytes: UInt64)
-  case resourcesUpdated(TransferResourceProgress)
   case fileStarted(fileURL: URL)
   case repairPlanned(downloadBytes: UInt64, writeBytes: UInt64)
   case repairDownloaded(bytes: UInt64)
@@ -42,26 +42,6 @@ public struct UpdateProgress: BaseProgress, Codable {
   public internal(set) var outcome: UpdateOutcome?
   public internal(set) var sourceVersion: String?
   public internal(set) var targetVersion: String?
-  public internal(set) var totalPatchBytes: UInt64 = 0
-  public internal(set) var totalInstallBytes: UInt64 = 0
-  public internal(set) var totalFiles: Int = 0
-  public internal(set) var downloadedBytes: UInt64 = 0
-  public internal(set) var completedFiles: Int = 0
-  public internal(set) var skippedFiles: Int = 0
-  public internal(set) var cachedFiles: Int = 0
-  public internal(set) var repairFiles: Int = 0
-  public internal(set) var writtenBytes: UInt64 = 0
-  public internal(set) var deletedBytes: UInt64 = 0
-  public internal(set) var totalDeleteFiles: Int = 0
-  public internal(set) var totalDeleteBytes: UInt64 = 0
-  public internal(set) var processedDeleteFiles: Int = 0
-  public internal(set) var totalRepairDownloadBytes: UInt64 = 0
-  public internal(set) var totalRepairWriteBytes: UInt64 = 0
-  public internal(set) var repairDownloadedBytes: UInt64 = 0
-  public internal(set) var repairWrittenBytes: UInt64 = 0
-  public internal(set) var receivedPatchBytes: UInt64 = 0
-  public internal(set) var retainedPatchBytes: UInt64 = 0
-  public internal(set) var transferredPatchBytes: UInt64 = 0
-  public internal(set) var remainingPatchBytes: UInt64 = 0
-  public internal(set) var resources: TransferResourceProgress?
+  public internal(set) var metrics = UpdateMetrics()
+  public init() {}
 }

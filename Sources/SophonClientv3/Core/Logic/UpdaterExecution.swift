@@ -17,21 +17,8 @@ extension Updater {
       installer: installer, downloadWorkers: maxCocurrentDownloads,
       writeWorkers: maxCocurrentWrites, reporter: reporter, cacheOnly: cacheOnly,
       gameID: gameID, mode: mode, predownload: predownload, finalize: finalize)
-    let sampling = Task {
-      while !Task.isCancelled {
-        await reporter.record(.resourcesUpdated(execution.workspace.telemetry.snapshot()))
-        do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-      }
-    }
-    do {
-      try await execution.run()
-      sampling.cancel()
-      await sampling.value
-    } catch {
-      sampling.cancel()
-      await sampling.value
-      throw error
-    }
+    await reporter.useResources(execution.workspace.telemetry)
+    try await execution.run()
   }
 
 }
@@ -229,13 +216,11 @@ private final class UpdateExecution: Sendable {
       try await runTransferIO(checkCancellation: false) { [originalsDirectory] in
         try removeOwnedFile(originalsDirectory)
       }
-      await reporter.record(.resourcesUpdated(workspace.telemetry.snapshot()))
       await reporter.record(.finished(.completed))
     } catch {
       await snapshots.close()
       try? await cachedPayloads.releaseAll()
       try? await workspace.finish(completed: false)
-      await reporter.record(.resourcesUpdated(workspace.telemetry.snapshot()))
       await reporter.record(
         .finished(Task.isCancelled ? .cancelled : .failed(reason: error.localizedDescription)))
       throw error
@@ -262,7 +247,6 @@ private final class UpdateExecution: Sendable {
         : try await workspace.retainedBytes(request)
       workspace.telemetry.planDownload(bundle.patchID, size: bundle.patchSize, retained: retained)
     }
-    await reporter.record(.resourcesUpdated(workspace.telemetry.snapshot()))
     let ready = AsyncChannel<ReadyPatch>()
     let downloadLimit = WorkLimiter(limit: min(downloadWorkers, settings.entryLimit))
     try await withThrowingTaskGroup(of: Void.self) { group in
