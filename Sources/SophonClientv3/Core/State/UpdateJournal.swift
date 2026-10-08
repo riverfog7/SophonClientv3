@@ -35,7 +35,8 @@ final class UpdateJournal: @unchecked Sendable {
 
   init(
     directory: URL, plan: UpdatePlan, gameID: String = "", mode: GameBranchCategoryScenario = .full,
-    predownload: Bool = false, cacheOnly: Bool = false, predownloadDirectory: String? = nil
+    predownload: Bool = false, cacheOnly: Bool = false, predownloadDirectory: String? = nil,
+    ignoredFiles: Set<String> = []
   ) throws {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let planURL = directory.appendingPathComponent("plan.json")
@@ -52,13 +53,15 @@ final class UpdateJournal: @unchecked Sendable {
       throw SophonClientError.UnknownError(
         "An unfinished update must be resumed or reconciled before starting another")
     }
+    let selectedPlan: UpdatePlan
     if let saved, canResume, !saved.finished || saved.cacheOnly {
-      self.plan = saved.plan
+      selectedPlan = saved.plan
       files = saved.files
     } else {
-      self.plan = plan
+      selectedPlan = plan
       files = [:]
     }
+    self.plan = excludingIgnoredFiles(from: selectedPlan, ignoredFiles: ignoredFiles)
     // Reset receipts before the new snapshot. A kill between these writes can repeat work,
     // but cannot carry an old finished record into a new execution mode.
     try Data().write(to: eventsURL, options: .atomic)

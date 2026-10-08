@@ -71,6 +71,7 @@ final class Installer: Sendable {
 
   internal func scan(
     installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
+    ignoredFiles: Set<String> = [],
     reporter: InstallationReporter? = nil
   )
     async throws
@@ -86,6 +87,11 @@ final class Installer: Sendable {
     var totalBytes: UInt64 = 0
     for manifest in manifests {
       for file in manifest.files where file.flags == FILE_FLAG_FILE {
+        if !ignoredFiles.isEmpty,
+          ignoredFiles.contains(ignoredFileKey(baseGameDir.appendingPathComponent(file.filename)))
+        {
+          continue
+        }
         totalFiles += 1
         totalChunks += file.chunks.count
         for chunk in file.chunks {
@@ -106,6 +112,11 @@ final class Installer: Sendable {
           let file = files[fileIndex]
           fileIndex += 1
           if file.flags == FILE_FLAG_DIRECTORY {
+            continue
+          }
+          if !ignoredFiles.isEmpty,
+            ignoredFiles.contains(ignoredFileKey(baseGameDir.appendingPathComponent(file.filename)))
+          {
             continue
           }
 

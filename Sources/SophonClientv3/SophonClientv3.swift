@@ -120,6 +120,15 @@ public final class SophonClientv3: @unchecked Sendable {
     sourceVersion: String? = nil, mode: GameBranchCategoryScenario = .full,
     predownload: Bool = false, reporter: UpdateReporter? = nil
   ) async throws -> UpdatePlan {
+    try await makeUpdatePlan(
+      sourceVersion: sourceVersion, mode: mode, predownload: predownload,
+      ignoredFiles: getIgnoredFiles(), reporter: reporter)
+  }
+
+  private func makeUpdatePlan(
+    sourceVersion: String?, mode: GameBranchCategoryScenario,
+    predownload: Bool, ignoredFiles: Set<String>, reporter: UpdateReporter?
+  ) async throws -> UpdatePlan {
     let branch = try await selectedBranch(predownload: predownload)
     let sourceVersion = try await updateSourceVersion(sourceVersion)
     if sourceVersion == branch.tag {
@@ -140,7 +149,7 @@ public final class SophonClientv3: @unchecked Sendable {
     await reporter?.record(.planningStarted)
     let plan = try updater.makePlan(
       sourceVersion: sourceVersion, targetVersion: branch.tag,
-      installInfos: infos.install, updateInfos: infos.update)
+      installInfos: infos.install, updateInfos: infos.update, ignoredFiles: ignoredFiles)
     await reporter?.record(.planningCompleted)
     return plan
   }
@@ -153,6 +162,7 @@ public final class SophonClientv3: @unchecked Sendable {
     do {
       await reporter.record(.phaseChanged(.metadata))
       let branch = try await selectedBranch(predownload: predownload)
+      let ignoredFiles = try getIgnoredFiles()
       let saved =
         transferSettings.preserveState
         ? try await Self.savedUpdateState(at: baseGameDir, settings: transferSettings) : nil
@@ -180,14 +190,15 @@ public final class SophonClientv3: @unchecked Sendable {
           throw SophonClientError.UnknownError(
             "Reconcile the unfinished update using the installation manifest")
         }
-        plan = try await planUpdate(
-          sourceVersion: detectedSource, mode: mode, predownload: predownload, reporter: reporter)
+        plan = try await makeUpdatePlan(
+          sourceVersion: detectedSource, mode: mode, predownload: predownload,
+          ignoredFiles: ignoredFiles, reporter: reporter)
       }
       try await updater.execute(
         plan, settings: transferSettings,
         downloadCache: cacheOnly ? predownloadCache : downloadCache, installer: installer,
         reporter: reporter, cacheOnly: cacheOnly, gameID: gameID, mode: mode,
-        predownload: predownload,
+        predownload: predownload, ignoredFiles: ignoredFiles,
         finalize: { [self] in try writeGameConfig(version: plan.targetVersion) })
     } catch {
       await reporter.record(
@@ -408,6 +419,10 @@ public final class SophonClientv3: @unchecked Sendable {
     return items
   }
 
+  private func getIgnoredFiles() throws -> Set<String> {
+    try readDownloadBlacklist(gameLaunchConfig, baseGameDir: baseGameDir)
+  }
+
   private func getRemovedMatchingFields() async throws -> Set<String> {
     var items: Set<String> = []
     for category in try decodeResCategory() {
@@ -490,6 +505,7 @@ public final class SophonClientv3: @unchecked Sendable {
         try TransferFileLock(baseGameDir.appendingPathComponent(".sophon-operation.lock"))
       }
       defer { withExtendedLifetime(operationLock) {} }
+      let ignoredFiles = try getIgnoredFiles()
       let updateDirectory = UpdateJournal.directory(
         settings: transferSettings, gameDirectory: baseGameDir)
       let update = try await runTransferIO { try UpdateJournal.load(directory: updateDirectory) }
@@ -522,7 +538,7 @@ public final class SophonClientv3: @unchecked Sendable {
             "Resume the unfinished installation with the same options, or use stateless verification"
           )
         }
-        plan = saved.remainingPlan()
+        plan = excludingIgnoredFiles(from: saved.remainingPlan(), ignoredFiles: ignoredFiles)
         journal = try await runTransferIO {
           try InstallationJournal(directory: directory, state: saved, resume: true)
         }
@@ -533,7 +549,7 @@ public final class SophonClientv3: @unchecked Sendable {
       } else {
         plan = try await makeInstallationPlan(
           mode: mode, voicePacks: additionalVoicePackMatchingFields, predownload: predownload,
-          branch: branch, reporter: reporter)
+          branch: branch, ignoredFiles: ignoredFiles, reporter: reporter)
         if transferSettings.preserveState {
           let state = SavedInstallationState(
             gameID: gameID, version: liveTarget, mode: mode,
@@ -577,7 +593,7 @@ public final class SophonClientv3: @unchecked Sendable {
 
   private func makeInstallationPlan(
     mode: GameBranchCategoryScenario, voicePacks: Set<String>, predownload: Bool,
-    branch: GameSubBranch, reporter: InstallationReporter
+    branch: GameSubBranch, ignoredFiles: Set<String>, reporter: InstallationReporter
   ) async throws -> InstallationPlan {
     let matchingFields = try await getRequiredMatchingFields(
       mode: mode, additionalVoicePackMatchingFields: voicePacks, predownload: predownload,
@@ -586,7 +602,8 @@ public final class SophonClientv3: @unchecked Sendable {
     let infos = try await manifestManager.getInstallInfos(
       matchingFields: matchingFields, branch: branch, predownload: predownload, reporter: reporter)
     await reporter.record(.planningStarted)
-    let plan = try await installer.scan(installInfos: infos, reporter: reporter)
+    let plan = try await installer.scan(
+      installInfos: infos, ignoredFiles: ignoredFiles, reporter: reporter)
     await reporter.record(.planningCompleted)
     return plan
   }

@@ -25,6 +25,7 @@ final class Updater: Sendable {
     targetVersion: String = "",
     installInfos: [(manifest: Manifest, chunkDownloadInfo: SophonDownloadInfo)],
     updateInfos: [(manifest: DiffManifest, diffDownloadInfo: SophonDownloadInfo)],
+    ignoredFiles: Set<String> = [],
   ) throws -> UpdatePlan {
     let diffManifests = updateInfos.map(\.manifest)
     try checkManifests(installInfos.map(\.manifest))
@@ -45,10 +46,12 @@ final class Updater: Sendable {
       sourceVersion: sourceVersion, manifests: diffManifests,
       retainedNames: Set(installFilesByName.keys))
 
-    return UpdatePlan(
-      sourceVersion: sourceVersion, targetVersion: targetVersion,
-      patchBundles: patchBundles, installFiles: installFiles,
-      deleteFiles: deleteFiles)
+    return excludingIgnoredFiles(
+      from: UpdatePlan(
+        sourceVersion: sourceVersion, targetVersion: targetVersion,
+        patchBundles: patchBundles, installFiles: installFiles,
+        deleteFiles: deleteFiles),
+      ignoredFiles: ignoredFiles)
   }
 
   private func makeInstallFiles(

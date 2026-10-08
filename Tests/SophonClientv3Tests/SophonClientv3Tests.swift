@@ -926,6 +926,185 @@ func testTransferInstallationCheckpoints() async throws {
 }
 
 @Test
+func testTransferResourceBlacklist() async throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let blacklist = root.appendingPathComponent("StarRail_Data/Persistent/DownloadBlacklist.json")
+  try FileManager.default.createDirectory(
+    at: blacklist.deletingLastPathComponent(), withIntermediateDirectories: true)
+  var config = try JSONDecoder().decode(
+    GameLaunchConfig.self,
+    from: Data(
+      #"""
+      {
+        "game": {"id": "fixture", "biz": "hkrpg_global"},
+        "installation_dir": "Game", "exe_file_name": "StarRail.exe",
+        "audio_pkg_scan_dir": "", "res_category_dir": "",
+        "wpf_exe_dir": "", "wpf_pkg_version_dir": "",
+        "enable_ldiff": true, "enable_scenario_pkg": false,
+        "enable_write_verify_result": false, "write_verify_result_path": "",
+        "enable_resource_blacklist": true,
+        "blacklist_dir": "StarRail_Data\\Persistent\\DownloadBlacklist.json"
+      }
+      """#.utf8))
+  #expect(try readDownloadBlacklist(config, baseGameDir: root).isEmpty)
+  let records = #"""
+    {"fileName":"STARRAIL_DATA\\Persistent\\Asb\\Windows\\deleted.block","md5":"unused"}
+
+    {"fileName":"StarRail_Data/StreamingAssets/Asb/Windows/deleted.block"}
+    {"fileName":"obsolete"}
+    {"metadata":"ignored"}
+    """#
+  try records.write(to: blacklist, atomically: true, encoding: .utf8)
+  let ignoredFiles = try readDownloadBlacklist(config, baseGameDir: root)
+  let filenames = [
+    "StarRail_Data/StreamingAssets/Asb/Windows/deleted.block",
+    "StarRail_Data/StreamingAssets/Asb/Windows/deleted.block.extra",
+    "StarRail_Data/Persistent/Asb/Windows/deleted.block",
+  ]
+  #expect(ignoredFiles.count == 3)
+  #expect(ignoredFiles.contains(ignoredFileKey(root.appendingPathComponent(filenames[0]))))
+  #expect(ignoredFiles.contains(ignoredFileKey(root.appendingPathComponent(filenames[2]))))
+  #expect(!ignoredFiles.contains(ignoredFileKey(root.appendingPathComponent(filenames[1]))))
+  config.enableResourceBlacklist = false
+  try "invalid JSON".write(to: blacklist, atomically: true, encoding: .utf8)
+  #expect(try readDownloadBlacklist(config, baseGameDir: root).isEmpty)
+  config.enableResourceBlacklist = true
+  #expect(throws: SophonClientError.self) {
+    try readDownloadBlacklist(config, baseGameDir: root)
+  }
+  try records.write(to: blacklist, atomically: true, encoding: .utf8)
+
+  let bytes = Data("resource".utf8)
+  let template = try transferTestPlan(
+    root: root, fixture: HDiffFixture(old: bytes, new: bytes, patch: bytes))
+  let downloadInfo = try #require(template.installFiles.first?.installChunks.first?.downloadInfo)
+  var chunk = ChunkInfo()
+  chunk.chunkID = "install"
+  chunk.md5 = md5Hex(bytes)
+  chunk.compressedMd5 = chunk.md5
+  chunk.compressedSize = UInt32(bytes.count)
+  chunk.uncompressedSize = UInt32(bytes.count)
+  var manifest = Manifest()
+  var diff = DiffManifest()
+  for (index, filename) in filenames.enumerated() {
+    var file = FileInfo()
+    file.filename = filename
+    file.flags = Int32(FILE_FLAG_FILE)
+    file.size = Int32(bytes.count)
+    file.md5 = chunk.md5
+    file.chunks = [chunk]
+    manifest.files.append(file)
+
+    var patch = Patch()
+    patch.key = "old"
+    patch.info.patchID = index == 2 ? "ignored-bundle" : "shared-bundle"
+    patch.info.patchSize = Int64(bytes.count * (index == 2 ? 1 : 2))
+    patch.info.patchName = md5Hex(index == 2 ? bytes : bytes + bytes)
+    patch.info.patchOffset = Int64(index == 1 ? bytes.count : 0)
+    patch.info.patchLength = Int64(bytes.count)
+    var target = DiffFileInfo()
+    target.filename = filename
+    target.size = file.size
+    target.hash = file.md5
+    target.patches = [patch]
+    diff.files.append(target)
+  }
+  var deletion = DeleteFile()
+  deletion.key = "old"
+  for filename in ["obsolete", "obsolete-other"] {
+    var file = DeleteFileInfo()
+    file.filename = filename
+    file.size = 4
+    deletion.info.list.append(file)
+  }
+  diff.filesDelete = [deletion]
+  let ignoredURL = root.appendingPathComponent(filenames[0])
+  let retainedURL = root.appendingPathComponent(filenames[1])
+  try FileManager.default.createDirectory(
+    at: ignoredURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+  let untouched = Data("untouched ignored bytes".utf8)
+  try untouched.write(to: ignoredURL)
+  try untouched.write(to: root.appendingPathComponent("obsolete"))
+  try Data("gone".utf8).write(to: root.appendingPathComponent("obsolete-other"))
+  var settings = TransferSettings()
+  settings.cacheDirectory = root.appendingPathComponent("cache").path
+  let cache = transferTestCache(settings.cacheURL.appendingPathComponent("downloads"))
+  let installer = try Installer(
+    baseGameDir: root, maxCocurrentChecks: 2, maxCocurrentDownloads: 1,
+    maxCocurrentPostProcessors: 1, maxCocurrentWrites: 1, downloadCache: cache)
+  let installInfos = [(manifest: manifest, chunkDownloadInfo: downloadInfo)]
+  let unfiltered = try await installer.scan(installInfos: installInfos)
+  let reporter = InstallationReporter(logger: .init(label: "test"))
+  let installPlan = try await installer.scan(
+    installInfos: installInfos, ignoredFiles: ignoredFiles, reporter: reporter)
+  #expect(installPlan.plannedFiles.map(\.fileURL) == [retainedURL])
+  #expect(installPlan.requiredChunks.first?.chunkApplicationInfos.map(\.fileURL) == [retainedURL])
+  #expect(installPlan.downloadSize == UInt64(bytes.count))
+  #expect(installPlan.diskWriteSize == UInt64(bytes.count))
+  let progress = await reporter.snapshot()
+  #expect(progress.metrics.verification.files.total == 1)
+  #expect(progress.metrics.common.read.completed == 0)
+  let retainedApplication = try #require(
+    unfiltered.requiredChunks.first?.chunkApplicationInfos.first { $0.fileURL == retainedURL })
+  let saved = SavedInstallationState(
+    gameID: "fixture", version: "new", mode: .full, voicePacks: [], predownload: false,
+    plan: unfiltered,
+    completedApplications: [
+      InstallationJournal.key(chunkID: chunk.chunkID, application: retainedApplication)
+    ],
+    trimmedFiles: [], finished: false)
+  let remaining = excludingIgnoredFiles(from: saved.remainingPlan(), ignoredFiles: ignoredFiles)
+  #expect(remaining.requiredChunks.isEmpty && remaining.plannedFiles.isEmpty)
+  #expect(remaining.downloadSize == 0 && remaining.diskWriteSize == 0)
+
+  let updater = try Updater(baseGameDir: root, maxCocurrentDownloads: 1, maxCocurrentWrites: 1)
+  let updateInfos = [(manifest: diff, diffDownloadInfo: downloadInfo)]
+  let fullPlan = try updater.makePlan(
+    sourceVersion: "old", targetVersion: "new", installInfos: installInfos, updateInfos: updateInfos
+  )
+  let updatePlan = try updater.makePlan(
+    sourceVersion: "old", targetVersion: "new", installInfos: installInfos,
+    updateInfos: updateInfos,
+    ignoredFiles: ignoredFiles)
+  #expect(updatePlan.installFiles.map(\.fileURL) == [retainedURL])
+  #expect(updatePlan.patchBundles.map(\.patchID) == ["shared-bundle"])
+  let bundle = try #require(updatePlan.patchBundles.first)
+  #expect(bundle.patches.count == 1 && bundle.patches.first?.patchOffset == UInt64(bytes.count))
+  #expect(bundle.patchSize == UInt64(bytes.count * 2) && bundle.patchHash == md5Hex(bytes + bytes))
+  #expect(updatePlan.deleteFiles.map(\.fileURL) == [root.appendingPathComponent("obsolete-other")])
+  #expect(updatePlan.installSize == UInt64(bytes.count) && updatePlan.deleteSize == 4)
+
+  let chunkFixture = TransferHTTPFixture(bytes)
+  let chunkURL = try #require(template.installFiles.first?.installChunks.first).getDownloadURL()
+  TransferURLProtocol.register(chunkFixture, at: chunkURL)
+  defer { TransferURLProtocol.remove(chunkURL) }
+  try bytes.write(to: retainedURL)
+  do {
+    let journal = try UpdateJournal(
+      directory: UpdateJournal.directory(settings: settings, gameDirectory: root), plan: fullPlan)
+    try journal.record(ignoredURL, stage: .repair)
+    try journal.record(root.appendingPathComponent(filenames[2]), stage: .cachedRepair)
+    try journal.record(retainedURL, stage: .completed)
+  }
+  let updateReporter = UpdateReporter(logger: .init(label: "test"))
+  try await updater.execute(
+    updatePlan, settings: settings, downloadCache: cache, installer: installer,
+    reporter: updateReporter, ignoredFiles: ignoredFiles)
+  #expect(chunkFixture.ranges.isEmpty)
+  #expect(try Data(contentsOf: ignoredURL) == untouched)
+  #expect(try Data(contentsOf: root.appendingPathComponent("obsolete")) == untouched)
+  #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(filenames[2]).path))
+  #expect(
+    !FileManager.default.fileExists(atPath: root.appendingPathComponent("obsolete-other").path))
+  #expect(try Data(contentsOf: retainedURL) == bytes)
+  #expect(await updateReporter.snapshot().metrics.repair.files == 0)
+  let finished = try #require(
+    try await SophonClientv3.savedUpdateState(at: root, settings: settings))
+  #expect(finished.finished && finished.plan.installFiles.map(\.fileURL) == [retainedURL])
+}
+
+@Test
 func testTransferVersionAndActionDecision() throws {
   func branch(_ version: String, from: [String]) throws -> GameSubBranch {
     try JSONDecoder().decode(
@@ -1600,6 +1779,7 @@ func testRPCGameConfigScenarioDescriptions() throws {
     }]}
     """#
   let configs = try JSONDecoder().decode(GameConfigs.self, from: Data(json.utf8))
+  #expect(configs.launchConfigs.first?.enableResourceBlacklist == nil)
   let info = try #require(configs.findBy(biz: "nap_global")?.scenarioPkgInfo)
   #expect(info.fullPkgName == "Full version")
   #expect(info.fullPkgDesc == "Full\nresources")
@@ -1615,6 +1795,17 @@ func testRPCGameConfigScenarioDescriptions() throws {
       "base_pkg_name": "Base version", "base_pkg_desc": "Base\nresources",
     ])
   var config = try #require(launchConfigs.first)
+  config["enable_resource_blacklist"] = true
+  config["blacklist_dir"] = "StarRail_Data\\Persistent\\DownloadBlacklist.json"
+  let blacklistConfig = try JSONDecoder().decode(
+    GameLaunchConfig.self, from: JSONSerialization.data(withJSONObject: config))
+  #expect(blacklistConfig.enableResourceBlacklist == true)
+  #expect(blacklistConfig.blacklistDir == config["blacklist_dir"] as? String)
+  let blacklistJSON = try #require(
+    JSONSerialization.jsonObject(with: JSONEncoder().encode(blacklistConfig)) as? [String: Any])
+  #expect(
+    try JSONSerialization.data(withJSONObject: blacklistJSON, options: .sortedKeys)
+      == JSONSerialization.data(withJSONObject: config, options: .sortedKeys))
   config["scenario_pkg_info"] = NSNull()
   let unsupported = try JSONDecoder().decode(
     GameLaunchConfig.self, from: JSONSerialization.data(withJSONObject: config))

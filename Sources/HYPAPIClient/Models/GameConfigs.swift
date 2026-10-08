@@ -18,6 +18,8 @@ public struct GameLaunchConfig: Codable, Sendable {
   public var exeFileName: String
   public var audioPkgScanDir: String
   public var resCategoryDir: String
+  public var enableResourceBlacklist: Bool?
+  public var blacklistDir: String?
   public var wpfExeDir: String
   public var wpfPkgVersionDir: String
   public var enableLdiff: Bool
@@ -32,6 +34,8 @@ public struct GameLaunchConfig: Codable, Sendable {
     case exeFileName = "exe_file_name"
     case audioPkgScanDir = "audio_pkg_scan_dir"
     case resCategoryDir = "res_category_dir"
+    case enableResourceBlacklist = "enable_resource_blacklist"
+    case blacklistDir = "blacklist_dir"
     case wpfExeDir = "wpf_exe_dir"
     case wpfPkgVersionDir = "wpf_pkg_version_dir"
     case enableLdiff = "enable_ldiff"

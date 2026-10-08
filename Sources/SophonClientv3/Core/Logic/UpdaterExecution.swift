@@ -8,13 +8,15 @@ extension Updater {
     _ plan: UpdatePlan, settings: TransferSettings, downloadCache: DownloadCache,
     installer: Installer, reporter: UpdateReporter, cacheOnly: Bool = false,
     gameID: String = "", mode: GameBranchCategoryScenario = .full, predownload: Bool = false,
+    ignoredFiles: Set<String> = [],
     finalize: @escaping @Sendable () throws -> Void = {}
   ) async throws {
     let execution = try await UpdateExecution(
       plan: plan, gameDirectory: baseGameDir, settings: settings, downloadCache: downloadCache,
       installer: installer, downloadWorkers: maxCocurrentDownloads,
       writeWorkers: maxCocurrentWrites, reporter: reporter, cacheOnly: cacheOnly,
-      gameID: gameID, mode: mode, predownload: predownload, finalize: finalize)
+      gameID: gameID, mode: mode, predownload: predownload, ignoredFiles: ignoredFiles,
+      finalize: finalize)
     await reporter.useResources(execution.workspace.telemetry)
     try await execution.run()
   }
@@ -105,6 +107,7 @@ private final class UpdateExecution: Sendable {
     plan: UpdatePlan, gameDirectory: URL, settings: TransferSettings, downloadCache: DownloadCache,
     installer: Installer, downloadWorkers: Int, writeWorkers: Int, reporter: UpdateReporter,
     cacheOnly: Bool, gameID: String, mode: GameBranchCategoryScenario, predownload: Bool,
+    ignoredFiles: Set<String>,
     finalize: @escaping @Sendable () throws -> Void
   ) async throws {
     guard cacheOnly || settings.diskCacheEnabled || settings.writeMode != .inPlace else {
@@ -141,10 +144,11 @@ private final class UpdateExecution: Sendable {
         try UpdateJournal(
           directory: stateDirectory, plan: plan, gameID: gameID, mode: mode,
           predownload: predownload, cacheOnly: cacheOnly,
-          predownloadDirectory: settings.predownloadURL(gameDirectory: gameDirectory).path)
+          predownloadDirectory: settings.predownloadURL(gameDirectory: gameDirectory).path,
+          ignoredFiles: ignoredFiles)
       } : nil
     self.journal = journal
-    let activePlan = journal?.plan ?? plan
+    let activePlan = journal?.plan ?? excludingIgnoredFiles(from: plan, ignoredFiles: ignoredFiles)
     self.plan = activePlan
     let originals = stateDirectory.appendingPathComponent("originals", isDirectory: true)
     workspace = try await TransferWorkspace(

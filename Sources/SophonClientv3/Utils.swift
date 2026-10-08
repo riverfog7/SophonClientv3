@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import HYPAPIClient
 import libzstd
 
 func md5Hex(_ data: Data) -> String {
@@ -147,4 +148,98 @@ func checkDiffManifests(_ manifests: [DiffManifest], sourceVersion: String) thro
       }
     }
   }
+}
+
+// Comparison only: preserve the original case when opening or writing files.
+func ignoredFileKey(_ fileURL: URL) -> String {
+  let path = fileURL.path.replacingOccurrences(of: "\\", with: "/")
+  return URL(fileURLWithPath: path).standardizedFileURL.path.lowercased()
+}
+
+func readDownloadBlacklist(_ config: GameLaunchConfig, baseGameDir: URL) throws -> Set<String> {
+  guard config.enableResourceBlacklist == true, let path = config.blacklistDir, !path.isEmpty else {
+    return []
+  }
+  let file = baseGameDir.appendingPathComponent(path.replacingOccurrences(of: "\\", with: "/"))
+  let contents: String
+  do {
+    contents = try String(contentsOf: file, encoding: .utf8)
+  } catch {
+    if isMissingFile(error) { return [] }
+    throw error
+  }
+
+  struct Entry: Decodable { let fileName: String? }
+  let decoder = JSONDecoder()
+  let dataDirectory =
+    URL(fileURLWithPath: config.exeFileName).deletingPathExtension().lastPathComponent.lowercased()
+    + "_data"
+  var ignoredFiles: Set<String> = []
+  for (index, line) in contents.split(separator: "\n", omittingEmptySubsequences: false)
+    .enumerated()
+  {
+    let line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !line.isEmpty else { continue }
+    let entry: Entry
+    do {
+      entry = try decoder.decode(Entry.self, from: Data(line.utf8))
+    } catch {
+      throw SophonClientError.UnknownError(
+        "Invalid download blacklist at line \(index + 1): \(error)")
+    }
+    guard let filename = entry.fileName else { continue }
+    let path = filename.replacingOccurrences(of: "\\", with: "/")
+    var components = path.split(separator: "/").map(String.init)
+    guard !path.isEmpty, !path.hasPrefix("/"), !components.contains(".."),
+      components.first?.contains(":") != true
+    else { throw SophonClientError.UnknownError("Invalid blacklist filename: \(filename)") }
+    ignoredFiles.insert(ignoredFileKey(baseGameDir.appendingPathComponent(path)))
+    guard components.count > 2, components[0].lowercased() == dataDirectory else { continue }
+    switch components[1].lowercased() {
+    case "persistent": components[1] = "StreamingAssets"
+    case "streamingassets": components[1] = "Persistent"
+    default: continue
+    }
+    ignoredFiles.insert(
+      ignoredFileKey(baseGameDir.appendingPathComponent(components.joined(separator: "/"))))
+  }
+  return ignoredFiles
+}
+
+func excludingIgnoredFiles(
+  from plan: InstallationPlan, ignoredFiles: Set<String>
+) -> InstallationPlan {
+  guard !ignoredFiles.isEmpty else { return plan }
+  let chunks = plan.requiredChunks.compactMap { chunk -> RequiredChunk? in
+    var chunk = chunk
+    chunk.chunkApplicationInfos.removeAll { ignoredFiles.contains(ignoredFileKey($0.fileURL)) }
+    return chunk.chunkApplicationInfos.isEmpty ? nil : chunk
+  }
+  return InstallationPlan(
+    totalChunkCount: chunks.count,
+    downloadSize: chunks.reduce(0) {
+      $0 + ($1.downloadInfo.compression ? $1.compressedSize : $1.uncompressedSize)
+    },
+    diskWriteSize: chunks.reduce(0) {
+      $0 + $1.uncompressedSize * UInt64($1.chunkApplicationInfos.count)
+    },
+    requiredChunks: chunks,
+    plannedFiles: plan.plannedFiles.filter { !ignoredFiles.contains(ignoredFileKey($0.fileURL)) })
+}
+
+func excludingIgnoredFiles(from plan: UpdatePlan, ignoredFiles: Set<String>) -> UpdatePlan {
+  guard !ignoredFiles.isEmpty else { return plan }
+  let bundles = plan.patchBundles.compactMap { bundle -> PlannedPatchBundle? in
+    let patches = bundle.patches.filter {
+      !ignoredFiles.contains(ignoredFileKey($0.target.fileURL))
+    }
+    guard !patches.isEmpty else { return nil }
+    return PlannedPatchBundle(
+      patchID: bundle.patchID, patchSize: bundle.patchSize, patchHash: bundle.patchHash,
+      downloadInfo: bundle.downloadInfo, patches: patches)
+  }
+  return UpdatePlan(
+    sourceVersion: plan.sourceVersion, targetVersion: plan.targetVersion, patchBundles: bundles,
+    installFiles: plan.installFiles.filter { !ignoredFiles.contains(ignoredFileKey($0.fileURL)) },
+    deleteFiles: plan.deleteFiles.filter { !ignoredFiles.contains(ignoredFileKey($0.fileURL)) })
 }
