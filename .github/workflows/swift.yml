@@ -17,7 +17,22 @@ jobs:
       - name: Import Swift signing keys
         if: runner.os == 'Linux'
         shell: bash
-        run: curl --fail --silent --show-error --location https://www.swift.org/keys/all-keys.asc | gpg --batch --import
+        run: |
+          swift_keys_file="$(mktemp)"
+          trap 'rm -f "$swift_keys_file"' EXIT
+          for swift_keys_attempt in 1 2 3; do
+            if curl --fail --silent --show-error --location \
+              --connect-timeout 10 --max-time 30 \
+              --output "$swift_keys_file" https://www.swift.org/keys/all-keys.asc \
+              && gpg --batch --show-keys "$swift_keys_file" > /dev/null; then
+              gpg --batch --import "$swift_keys_file"
+              exit 0
+            fi
+            echo "::warning::Invalid Swift signing-key download (attempt $swift_keys_attempt/3)"
+            if [ "$swift_keys_attempt" -lt 3 ]; then sleep 2; fi
+          done
+          echo "::error::Could not download valid Swift signing keys"
+          exit 1
       - uses: swift-actions/setup-swift@v3
         with:
           swift-version: "6.3.3"
