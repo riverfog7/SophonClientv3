@@ -57,6 +57,11 @@ let package = Package(
         .product(name: "NIOHTTP1", package: "swift-nio"),
         "HYPAPIClient",
         "SophonClientv3",
+      ],
+      linkerSettings: [
+        .unsafeFlags(
+          ["-Xlinker", "-S", "-Xlinker", "-x"],
+          .when(platforms: [.macOS], configuration: .release))
       ]
     ),
     .testTarget(
