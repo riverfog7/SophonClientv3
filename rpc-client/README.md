@@ -10,6 +10,28 @@ npm test
 
 Import `sophon-rpc-client/react` (or the package root) in React/browser code, `sophon-rpc-client/node` in Node, and `sophon-rpc-client/neutralino` in Yaagl. When importing built files directly, use `dist/index.js`, `dist/node.js`, or `dist/neutralino.js` respectively. Browser entry points contain no Node imports.
 
+## Session settings
+
+Set manifest caching and logging when starting the RPC process. Node and Neutralino use the existing second argument to `stdio()`:
+
+```ts
+const client = await SophonRpcClient.stdio("/path/to/SophonCLI", [
+  "--manifest-cache-dir", "/app-cache/sophon/manifests",
+  "--log-file", "/app-data/sophon.log",
+  "--log-level", "debug",
+]);
+```
+
+| Option | Default |
+| --- | --- |
+| `--manifest-cache-dir PATH` | System cache directory under `SophonClientv3/manifests` |
+| `--log-file PATH` | Omitted: logging disabled |
+| `--log-level LEVEL` | `info`; accepts `trace`, `debug`, `info`, `notice`, `warning`, `error`, `critical` |
+
+These settings apply to every operation/query in that RPC process and remain fixed until it restarts. Logs append to existing contents; concurrent operations share one file writer. stdout stays reserved for JSON-RPC. A file-open error rejects startup; a later write failure is reported to stderr once and disables file logging while operations continue.
+
+For HTTP, add the same flags to `SophonCLI rpc --transport http ...` when starting the server. All browser clients use that server's settings. Working cache, predownload storage, resume state, budgets, and workers remain per-operation parameters under `transfer`, `downloads`, and `writes`.
+
 ## Yaagl / Neutralino
 
 The adapter targets [Yaagl main](https://github.com/yaagl/yet-another-anime-game-launcher/blob/784dda385c536286ef75f92e990514ac81509784/neutralino.config.json): Neutralino runtime **4.11.0**, JavaScript client **3.8.0**. It uses the application's existing global `Neutralino`; it does not install another SDK or call `Neutralino.init()`. Yaagl's native allowlist already includes `os.*`.

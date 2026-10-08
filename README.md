@@ -76,6 +76,8 @@ Operation parameters: `game`, `directory`, optional `cn`, `mode` (`full`/`base`)
 
 Omitting `transfer.ioPolicy` uses serialized updates and parallel installations. Set it to `"parallel"` to let updates use the `writes` worker count, or `"serialized"` to serialize installation target I/O too. `transfer.memoryLimit` defaults to 1 GiB. Set `transfer.diskCacheEnabled: false` to disable working disk spill; explicit predownload storage is independent. Update status includes per-bundle download bytes and per-volume I/O/cache counters under `progress.metrics.common.resources`. Installation and update share common timing, metadata, network, I/O, file, and resource metrics; operation-specific sections cover verification, processing, patches, repair, and deletion. The [TypeScript schemas](rpc-client/src/index.ts) describe all fields.
 
+RPC process defaults are set with `--manifest-cache-dir PATH`, `--log-file PATH`, and `--log-level LEVEL`. They apply to every game query and operation in both transports. Without overrides, manifests use the system cache and file logging is disabled; the default log level is `info`. File logs append safely across concurrent operations, and logging failures stay off JSON-RPC stdout. Node and Neutralino pass these flags through `stdio()`'s argument array; HTTP callers use the settings supplied when starting the server. See [session settings](rpc-client/README.md#session-settings).
+
 For HTTP, run:
 
 ```sh

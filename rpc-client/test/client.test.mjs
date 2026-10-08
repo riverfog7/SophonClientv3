@@ -179,6 +179,7 @@ async function fixture(hung = false) {
       + "rl.on('line',line=>{const r=JSON.parse(line);\n"
       + "if(r.method==='rpc.shutdown'){reply(r.id,true);rl.close();process.exit(0);}\n"
       + "else if(r.method==='events'){for(let i=0;i<1024;i+=128){process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'operation.progress',params:{operationID:'job',status:'running',kind:'install',events:Array.from({length:128},(_,j)=>({chunkDownloaded:{chunkID:String(i+j),bytes:1}})),progress:installProgress(i+128)}})+'\\n');}reply(r.id,1024);}\n"
+      + "else if(r.method==='argv'){reply(r.id,process.argv.slice(2));}\n"
       + "else if(r.method==='operation.wait'){waiting=r.id;}\n"
       + "else if(r.method==='operation.cancel'){reply(r.id,true);reply(waiting,{operationID:'job',status:'cancelled'});}\n"
       + "else reply(r.id,{operationID:'job'});});\n";
@@ -190,7 +191,10 @@ test("Node stdio supports concurrent wait/cancel, process errors and forced shut
   const normal = await fixture();
   const hung = await fixture(true);
   try {
-    const client = NodeClient.stdio(normal.file);
+    const arguments_ = ["--manifest-cache-dir", join(normal.directory, "manifest cache"),
+      "--log-file", join(normal.directory, "session log.txt"), "--log-level", "debug"];
+    const client = NodeClient.stdio(normal.file, arguments_);
+    assert.deepEqual(await client.call("argv"), ["rpc", ...arguments_]);
     const seen = [];
     client.onProgressBatch(batch => { for (const event of batch.events) seen.push(Number(event.chunkDownloaded.chunkID)); });
     assert.equal(await client.call("events"), 1024);
@@ -267,12 +271,15 @@ test("Neutralino 3.8/4.11 process APIs preserve quoting, framing and shutdown", 
   const hung = await fixture(true);
   const bridge = neutralinoBridge();
   try {
-    const client = await NeutralinoClient.stdio(normal.file, ["literal$()"], {
+    const arguments_ = ["literal$()", "--manifest-cache-dir", join(normal.directory, "manifest cache"),
+      "--log-file", join(normal.directory, "session log.txt"), "--log-level", "debug"];
+    const client = await NeutralinoClient.stdio(normal.file, arguments_, {
       neutralino: bridge.api,
       onStderr: async () => { throw new Error("UI log failure"); },
     });
     assert.ok(bridge.command.includes("'\\''"));
     assert.ok(bridge.command.includes("'literal$()'"));
+    assert.deepEqual(await client.call("argv"), ["rpc", ...arguments_]);
     bridge.emit({ id: 900, action: "stdOut", data: "not our process\n" });
     bridge.emit({ id: 1, action: "stdErr", data: "fixture stderr" });
     const seen = [];
