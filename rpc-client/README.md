@@ -72,8 +72,8 @@ function Progress({ operationID }: { operationID: string }) {
     const timer = setInterval(() => { void refresh().catch(console.error); }, 250);
     return () => { stopped = true; clearInterval(timer); };
   }, [operationID]);
-  return <span>{status?.progress?.downloadedBytes ?? 0}
-    / {status?.progress?.totalDownloadBytes ?? "?"}</span>;
+  const files = status?.progress?.metrics.common.files;
+  return <span>{files?.completed ?? 0} / {files?.total ?? "?"} files</span>;
 }
 ```
 
@@ -90,11 +90,35 @@ await client.close();
 
 ## Progress and lifecycle
 
-Installation progress exposes the reporter's full snapshot, including `totalDownloadBytes`, `totalWriteBytes`, `totalChunk`, `totalFile`, `downloadedBytes`, `writtenBytes`, `scannedFiles`, `completedFiles`, and `completedChunks`. Totals can be absent until their plan is known. Download totals represent the planned network payload; write totals represent placements. They are not free-storage estimates.
+Progress has `phase`, optional `outcome`, and `metrics`. Updates also include `sourceVersion` and `targetVersion` when known. The exported `InstallationMetrics` and `UpdateMetrics` types share `metrics.common`; there are no legacy flat counters.
+
+| Section | Contents |
+| --- | --- |
+| `common.timing` | Operation/stage elapsed seconds, completed phase durations, overall ETA |
+| `common.metadata` | All, installation, and diff manifest counts; planning completion |
+| `common.network` | New network bytes in this run, including retries |
+| `common.read` | Application read bytes, including installation verification |
+| `common.write` | Installation placements or verified update output; excludes already updated files |
+| `common.files` | Completed/total files, including skipped or cached update targets |
+| `common.resources` | RAM/cache limits and usage, per-volume read/write metrics, per-bundle received/retained/new bytes |
+| Install `verification` | Assessed bytes, chunks, files, missing and broken file counts |
+| Install `trimming`, `download`, `processing` | Trimmed files, received payload bytes, processed chunks/bytes |
+| Install `downloadedChunks`, `retries` | Completed unique payload downloads and retry attempts |
+| Update `patch` | Required/received/remaining patch bytes, new patch network bytes, retained/verified bytes, ready bundles |
+| Update `repair`, `deletion` | Repair download/write metrics and file count; delete entry and byte progress |
+| Update `skippedFiles`, `cachedFiles` | Already updated targets and cache-only targets |
+
+Each `SophonMetric` has `completed`, optional `total`, `remaining`, `percentage`, `rate`, `averageRate`, `etaSeconds`, plus `elapsedSeconds` and `isFinished`. Byte rates use bytes/s; count rates use items/s. Unknown totals or estimates are omitted. Recent rates use a roughly five-second window and decay to zero while idle; averages cover the active stage. Finished metrics freeze. A finished cancelled/failed stage can still have remaining work and no ETA.
+
+Installation chunk traffic is aggregated in constant time; resource snapshots include individual patch bundles rather than every installation chunk. Raw chunk events remain available.
+
+Reporters update counters on work events and read live I/O telemetry when a snapshot is requested. They own the clock and metric calculations, with no periodic publishing task. CLI rendering and stdio RPC sampling run outside the reporters at 250 ms by default; HTTP clients choose their polling interval. Applications format the supplied metrics without reconstructing totals, speeds, percentages, or ETAs from raw events.
+
+Received bytes include retained data; `common.network` and `patch.network` count new traffic. Update output is counted after hash verification; per-volume writes include live output/cache I/O before a file finishes. Installation verification distinguishes assessed bytes from actual reads, so missing files advance assessment without claiming a read. These counters are application I/O, not physical device traffic or free-storage estimates.
 
 **A resolved `wait()` is not a success signal.** Failed and cancelled operations also return a final status. Check `result.status === "completed"`. `wait()` and `cancel()` can run concurrently. Aborting a client request only stops waiting for that request; use `cancel(operationID)` to cancel the CLI operation.
 
-Stdio sends `operation.progress` notifications with `kind: "install" | "update"`, an `events` array of up to 128 raw reporter events, and the latest `progress` snapshot. The sender takes whatever is already queued; it never waits for a timer or a full batch. Events remain ordered within an operation and none are sampled out. The snapshot may reflect events not yet delivered, so use it for authoritative totals rather than as an event-log checkpoint.
+Stdio sends `operation.progress` notifications with `kind: "install" | "update"`, an `events` array of 0–128 raw reporter events, and the latest `progress` snapshot. Raw events are sent as soon as the writer is available, without waiting for a timer or a full batch. An external 250 ms sampler also requests snapshots while no events arrive; these frames have `events: []`. Sampler wakeups coalesce behind a slow writer. Events remain ordered within an operation and none are sampled out. The snapshot may reflect events not yet delivered, so use it for authoritative totals rather than as an event-log checkpoint.
 
 ```ts
 const unsubscribe = client.onProgressBatch(batch => {

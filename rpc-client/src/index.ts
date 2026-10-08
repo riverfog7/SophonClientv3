@@ -37,29 +37,32 @@ export interface GameAction {
   reason: string;
 }
 
-export interface OperationProgress {
-  phase: string;
-  totalDownloadBytes?: number | null;
-  totalWriteBytes?: number | null;
-  downloadedBytes: number;
-  writtenBytes: number;
-  [field: string]: unknown;
+// Byte metrics use bytes/s; count metrics use items/s. Unknown estimates are omitted.
+export interface SophonMetric {
+  completed: number;
+  total?: number;
+  remaining?: number;
+  percentage?: number;
+  elapsedSeconds: number;
+  rate?: number;
+  averageRate?: number;
+  etaSeconds?: number;
+  isFinished: boolean;
 }
 
-export interface InstallationProgress extends OperationProgress {
-  phase: "metadata" | "scanning" | "trimming" | "running";
-  totalChunk?: number | null;
-  totalFile?: number | null;
-  scannedFiles: number;
-  completedFiles: number;
-  completedChunks: number;
-  outcome?: OperationOutcome;
+export interface SophonTiming {
+  elapsedSeconds: number;
+  stageElapsedSeconds: number;
+  phaseDurations: Record<string, number>;
+  etaSeconds?: number;
 }
 
-export type OperationOutcome =
-  | { completed: Record<string, never> }
-  | { cancelled: Record<string, never> }
-  | { failed: { reason: string } };
+export interface SophonMetadataMetrics {
+  manifests: SophonMetric;
+  installationManifests: SophonMetric;
+  diffManifests: SophonMetric;
+  planning: SophonMetric;
+}
 
 export interface DownloadByteProgress {
   id: string;
@@ -70,53 +73,111 @@ export interface DownloadByteProgress {
   transferredBytes: number;
 }
 
-export interface StorageByteProgress {
+export interface SophonDeviceMetrics {
   id: string;
   location: string;
   roles: string[];
-  readBytes: number;
-  writtenBytes: number;
   cacheBytes: number;
   reservedCacheBytes: number;
+  read: SophonMetric;
+  write: SophonMetric;
 }
 
-export interface TransferResourceProgress {
+export interface SophonResourceMetrics {
   memoryBytes: number;
   memoryLimit: number;
   diskLimit: number;
-  devices: StorageByteProgress[];
+  diskReservedBytes: number;
+  devices: SophonDeviceMetrics[];
   downloads: DownloadByteProgress[];
 }
 
-export interface UpdateProgress extends OperationProgress {
+export interface SophonMetrics {
+  timing: SophonTiming;
+  metadata: SophonMetadataMetrics;
+  network: SophonMetric;
+  read: SophonMetric;
+  write: SophonMetric;
+  files: SophonMetric;
+  resources?: SophonResourceMetrics;
+}
+
+export interface SophonVerificationMetrics {
+  bytes: SophonMetric;
+  chunks: SophonMetric;
+  files: SophonMetric;
+  missingFiles: number;
+  brokenFiles: number;
+}
+
+export interface SophonProcessingMetrics {
+  chunks: SophonMetric;
+  bytes: number;
+}
+
+export interface InstallationMetrics {
+  common: SophonMetrics;
+  verification: SophonVerificationMetrics;
+  trimming: SophonMetric;
+  download: SophonMetric;
+  downloadedChunks: number;
+  processing: SophonProcessingMetrics;
+  retries: number;
+}
+
+export interface SophonPatchMetrics {
+  data: SophonMetric;
+  network: SophonMetric;
+  retainedBytes: number;
+  verifiedBytes: number;
+  bundlesReady: number;
+}
+
+export interface SophonRepairMetrics {
+  download: SophonMetric;
+  write: SophonMetric;
+  files: number;
+}
+
+export interface SophonDeletionMetrics {
+  files: SophonMetric;
+  bytes: SophonMetric;
+}
+
+export interface UpdateMetrics {
+  common: SophonMetrics;
+  patch: SophonPatchMetrics;
+  repair: SophonRepairMetrics;
+  deletion: SophonDeletionMetrics;
+  skippedFiles: number;
+  cachedFiles: number;
+}
+
+export type OperationOutcome =
+  | { completed: Record<string, never> }
+  | { cancelled: Record<string, never> }
+  | { failed: { reason: string } };
+
+export interface InstallationProgress {
+  phase: "metadata" | "scanning" | "trimming" | "running";
+  outcome?: OperationOutcome;
+  metrics: InstallationMetrics;
+}
+
+export interface UpdateProgress {
   phase: "metadata" | "caching" | "running" | "repairing" | "deleting";
   outcome?: OperationOutcome;
   sourceVersion?: string;
   targetVersion?: string;
-  totalPatchBytes: number;
-  totalInstallBytes: number;
-  totalFiles: number;
-  completedFiles: number;
-  skippedFiles: number;
-  cachedFiles: number;
-  repairFiles: number;
-  deletedBytes: number;
-  totalDeleteFiles: number;
-  totalDeleteBytes: number;
-  processedDeleteFiles: number;
-  totalRepairDownloadBytes: number;
-  totalRepairWriteBytes: number;
-  repairDownloadedBytes: number;
-  repairWrittenBytes: number;
-  receivedPatchBytes: number;
-  retainedPatchBytes: number;
-  transferredPatchBytes: number;
-  remainingPatchBytes: number;
-  resources?: TransferResourceProgress;
+  metrics: UpdateMetrics;
 }
+
+export type OperationProgress = InstallationProgress | UpdateProgress;
 
 // Swift's tagged-enum encoding retains the case and all associated values.
 export type InstallationEvent =
+  | { planningStarted: Record<string, never> }
+  | { planningCompleted: Record<string, never> }
   | { metadataPlanned: { totalManifests: number } }
   | { manifestPulled: { matchingField: string; predownload: boolean } }
   | { scanPlanned: { totalFiles: number; totalChunks: number; totalBytes: number } }
@@ -137,13 +198,16 @@ export type InstallationEvent =
   | { finished: { _0: OperationOutcome } };
 
 export type UpdateEvent =
+  | { metadataPlanned: { installationManifests: number; diffManifests: number } }
+  | { manifestPulled: { kind: "install" | "diff"; matchingField: string } }
+  | { planningStarted: Record<string, never> }
+  | { planningCompleted: Record<string, never> }
   | { planned: {
       sourceVersion: string; targetVersion: string; patchBytes: number; installBytes: number;
       totalFiles: number; deleteFiles: number; deleteBytes: number;
     } }
   | { bundleDownloaded: { patchID: string; bytes: number } }
   | { patchDownloadsPlanned: { bytes: number } }
-  | { resourcesUpdated: { _0: TransferResourceProgress } }
   | { fileStarted: { fileURL: string } }
   | { repairPlanned: { downloadBytes: number; writeBytes: number } }
   | { repairDownloaded: { bytes: number } }

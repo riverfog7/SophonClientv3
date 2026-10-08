@@ -10,6 +10,20 @@ import { SophonRpcClient as NodeClient } from "../dist/node.js";
 import { SophonRpcClient as NeutralinoClient } from "../dist/neutralino.js";
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const metric = (completed = 0) => ({ completed, elapsedSeconds: 0, isFinished: false });
+const installProgress = (downloaded = 0) => ({
+  phase: "running",
+  metrics: {
+    common: {
+      timing: { elapsedSeconds: 0, stageElapsedSeconds: 0, phaseDurations: {} },
+      metadata: { manifests: metric(), installationManifests: metric(), diffManifests: metric(), planning: metric() },
+      network: metric(downloaded), read: metric(), write: metric(), files: metric(),
+    },
+    verification: { bytes: metric(), chunks: metric(), files: metric(), missingFiles: 0, brokenFiles: 0 },
+    trimming: metric(), download: metric(downloaded), downloadedChunks: downloaded,
+    processing: { chunks: metric(), bytes: 0 }, retries: 0,
+  },
+});
 
 class FakeTransport {
   frames = [];
@@ -58,6 +72,7 @@ test("progress batches preserve 10,000 events, framing and listener isolation", 
   client.onProgressBatch(async () => { throw new Error("batch UI failure"); });
   const unsubscribe = client.onProgressBatch(batch => {
     sizes.push(batch.events.length);
+    assert.ok(batch.progress.metrics.download.completed >= seen.length);
     for (const event of batch.events) seen.push(Number(event.chunkDownloaded.chunkID));
   });
   const pending = client.call("while-events-arrive");
@@ -68,8 +83,7 @@ test("progress batches preserve 10,000 events, framing and listener isolation", 
     }));
     const frame = JSON.stringify({ jsonrpc: "2.0", method: "operation.progress", params: {
       operationID: "job", status: "running", kind: "install", events,
-      progress: { phase: "running", downloadedBytes: offset + events.length, writtenBytes: 0,
-        scannedFiles: 0, completedFiles: 0, completedChunks: offset + events.length },
+      progress: installProgress(offset + events.length),
     } }) + "\n";
     transport.receive(frame.slice(0, 23));
     transport.receive(frame.slice(23));
@@ -81,11 +95,17 @@ test("progress batches preserve 10,000 events, framing and listener isolation", 
   assert.equal(sizes.length, 79);
   assert.equal(sizes.at(-1), 16);
   assert.equal(errors.length, 79);
+  // Aggregate sampling during a quiet transfer has no synthetic raw events.
+  transport.receive(JSON.stringify({ jsonrpc: "2.0", method: "operation.progress", params: {
+    operationID: "job", status: "running", kind: "install", events: [], progress: installProgress(10_000),
+  } }) + "\n");
+  assert.equal(sizes.at(-1), 0);
+  assert.deepEqual(seen, Array.from({ length: 10_000 }, (_, index) => index));
   unsubscribe();
   transport.receive(JSON.stringify({ jsonrpc: "2.0", method: "operation.progress", params: {
     operationID: "job", status: "running", progress: { phase: "metadata" },
   } }) + "\n");
-  assert.equal(sizes.length, 79);
+  assert.equal(sizes.length, 80);
   await client.close();
 });
 
@@ -153,11 +173,12 @@ async function fixture(hung = false) {
     ? "#!/usr/bin/env node\nprocess.on('SIGTERM',()=>{}); process.stdin.resume(); setInterval(()=>{},1000);\n"
     : "#!/usr/bin/env node\n"
       + "const rl=require('node:readline').createInterface({input:process.stdin});\n"
+      + "const metric=" + metric.toString() + "; const installProgress=" + installProgress.toString() + ";\n"
       + "let waiting;\n"
       + "function reply(id,result){process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,result})+'\\n');}\n"
       + "rl.on('line',line=>{const r=JSON.parse(line);\n"
       + "if(r.method==='rpc.shutdown'){reply(r.id,true);rl.close();process.exit(0);}\n"
-      + "else if(r.method==='events'){for(let i=0;i<1024;i+=128){process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'operation.progress',params:{operationID:'job',status:'running',kind:'install',events:Array.from({length:128},(_,j)=>({chunkDownloaded:{chunkID:String(i+j),bytes:1}})),progress:{phase:'running',downloadedBytes:i+128,writtenBytes:0,scannedFiles:0,completedFiles:0,completedChunks:i+128}}})+'\\n');}reply(r.id,1024);}\n"
+      + "else if(r.method==='events'){for(let i=0;i<1024;i+=128){process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'operation.progress',params:{operationID:'job',status:'running',kind:'install',events:Array.from({length:128},(_,j)=>({chunkDownloaded:{chunkID:String(i+j),bytes:1}})),progress:installProgress(i+128)}})+'\\n');}reply(r.id,1024);}\n"
       + "else if(r.method==='operation.wait'){waiting=r.id;}\n"
       + "else if(r.method==='operation.cancel'){reply(r.id,true);reply(waiting,{operationID:'job',status:'cancelled'});}\n"
       + "else reply(r.id,{operationID:'job'});});\n";
