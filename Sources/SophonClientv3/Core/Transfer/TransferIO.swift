@@ -68,7 +68,7 @@ struct FileDigest: Sendable {
 }
 
 func digestFile(
-  _ fileURL: URL, telemetry: TransferTelemetry? = nil, device: String? = nil
+  _ fileURL: URL, telemetry: TransferTelemetry? = nil, device: String? = nil, isCache: Bool = false
 ) throws -> FileDigest? {
   let handle: FileHandle
   do { handle = try FileHandle(forReadingFrom: fileURL) } catch {
@@ -90,14 +90,22 @@ func digestFile(
         }
         hasher.update(data: data)
         size += UInt64(data.count)
-        telemetry?.read(UInt64(data.count), device: activeDevice)
+        if isCache {
+          telemetry?.cacheRead(UInt64(data.count), inMemory: false, device: activeDevice)
+        } else {
+          telemetry?.read(UInt64(data.count), device: activeDevice)
+        }
       }
     }
   #else
     while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
       hasher.update(data: data)
       size += UInt64(data.count)
-      telemetry?.read(UInt64(data.count), device: activeDevice)
+      if isCache {
+        telemetry?.cacheRead(UInt64(data.count), inMemory: false, device: activeDevice)
+      } else {
+        telemetry?.read(UInt64(data.count), device: activeDevice)
+      }
     }
   #endif
   return FileDigest(

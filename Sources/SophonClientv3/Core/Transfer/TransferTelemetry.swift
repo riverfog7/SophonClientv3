@@ -22,12 +22,19 @@ struct TransferDownloadTotals: Sendable {
   var transferredBytes: UInt64 = 0
 }
 
+struct CacheByteProgress: Sendable {
+  var readBytes: UInt64 = 0
+  var writtenBytes: UInt64 = 0
+}
+
 struct TransferResourceProgress: Sendable {
   let memoryBytes: UInt64
   let memoryLimit: UInt64
   let diskLimit: UInt64
   let devices: [StorageByteProgress]
   let downloads: [DownloadByteProgress]
+  let memoryCache: CacheByteProgress
+  let diskCache: CacheByteProgress
 
   let downloadTotals: [String: TransferDownloadTotals]
 
@@ -43,6 +50,8 @@ final class TransferTelemetry: @unchecked Sendable {
   private let memoryLimit: UInt64
   private let diskLimit: UInt64
   private var memoryBytes: UInt64 = 0
+  private var memoryCache = CacheByteProgress()
+  private var diskCache = CacheByteProgress()
   private var devices: [String: StorageByteProgress] = [:]
   private var locations: [String: String] = [:]
   private var downloads: [String: DownloadByteProgress] = [:]
@@ -80,6 +89,28 @@ final class TransferTelemetry: @unchecked Sendable {
 
   func write(_ bytes: UInt64, device: String) {
     lock.withLock { devices[device]?.writtenBytes += bytes }
+  }
+
+  func cacheRead(_ bytes: UInt64, inMemory: Bool, device: String = "") {
+    lock.withLock {
+      if inMemory {
+        memoryCache.readBytes += bytes
+      } else {
+        diskCache.readBytes += bytes
+        devices[device]?.readBytes += bytes
+      }
+    }
+  }
+
+  func cacheWrite(_ bytes: UInt64, inMemory: Bool, device: String = "") {
+    lock.withLock {
+      if inMemory {
+        memoryCache.writtenBytes += bytes
+      } else {
+        diskCache.writtenBytes += bytes
+        devices[device]?.writtenBytes += bytes
+      }
+    }
   }
 
   func reserve(_ bytes: UInt64, inMemory: Bool, device: String) {
@@ -167,6 +198,7 @@ final class TransferTelemetry: @unchecked Sendable {
         memoryBytes: memoryBytes, memoryLimit: memoryLimit, diskLimit: diskLimit,
         devices: devices.values.sorted { $0.id < $1.id },
         downloads: patchIDs.compactMap { downloads[$0] }.sorted { $0.id < $1.id },
+        memoryCache: memoryCache, diskCache: diskCache,
         downloadTotals: downloadTotals)
     }
   }

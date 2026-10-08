@@ -328,7 +328,7 @@ private final class UpdateExecution: Sendable {
     }
     await reporter.record(.fileStarted(fileURL: patch.target.fileURL))
     let input = try job.bundle.input.slice(offset: patch.patchOffset, size: patch.patchLength)
-    let isHDiff = try await runTransferIO { try input.isHDiff() }
+    let isHDiff = try await runTransferIO { try input.isHDiff(telemetry: self.workspace.telemetry) }
     var originalInput: PatchInput?
     if isHDiff, let original = patch.original {
       let snapshot = try await snapshots.get(original)

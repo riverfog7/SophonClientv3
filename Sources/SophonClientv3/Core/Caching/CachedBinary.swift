@@ -149,7 +149,6 @@ final class CachedBinaryWriter: @unchecked Sendable {
       if let handle = writer.handle {
         try handle.seek(toOffset: offset)
         try handle.write(contentsOf: data)
-        storage.reservation.telemetry?.write(length, device: storage.reservation.device)
       } else {
         storage.data?.replaceSubrange(Int(offset)..<Int(offset + length), with: data)
       }
@@ -157,6 +156,8 @@ final class CachedBinaryWriter: @unchecked Sendable {
       try? writer.discard()
       throw error
     }
+    storage.reservation.telemetry?.cacheWrite(
+      length, inMemory: storage.reservation.inMemory, device: storage.reservation.device)
     writer.recordRange(offset..<(offset + length))
   }
 
@@ -286,12 +287,18 @@ struct CachedBinary: Sendable {
   }
 
   internal func data() throws -> Data {
-    if let data = storage.data, offset == 0, size == UInt64(data.count) { return data }
+    if let data = storage.data, offset == 0, size == UInt64(data.count) {
+      storage.reservation.telemetry?.cacheRead(size, inMemory: true)
+      return data
+    }
     return try makeReader().read(at: 0, count: Int(size))
   }
 
   internal func checksum() throws -> String {
-    if let data = storage.data, offset == 0, size == UInt64(data.count) { return md5Hex(data) }
+    if let data = storage.data, offset == 0, size == UInt64(data.count) {
+      storage.reservation.telemetry?.cacheRead(size, inMemory: true)
+      return md5Hex(data)
+    }
     let reader = try makeReader()
     var hasher = Insecure.MD5()
     var position: UInt64 = 0
@@ -356,6 +363,7 @@ final class CachedBinaryReader: @unchecked Sendable {
     defer { lock.unlock() }
     let position = binary.offset + offset
     if let data = binary.storage.data {
+      binary.storage.reservation.telemetry?.cacheRead(UInt64(count), inMemory: true)
       return data.subdata(in: Int(position)..<(Int(position) + count))
     }
 
@@ -367,8 +375,8 @@ final class CachedBinaryReader: @unchecked Sendable {
         throw BinaryCacheError.unexpectedEndOfFile
       }
       data.append(part)
-      binary.storage.reservation.telemetry?.read(
-        UInt64(part.count), device: binary.storage.reservation.device)
+      binary.storage.reservation.telemetry?.cacheRead(
+        UInt64(part.count), inMemory: false, device: binary.storage.reservation.device)
     }
     return data
   }

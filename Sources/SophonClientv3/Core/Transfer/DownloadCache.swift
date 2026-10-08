@@ -119,7 +119,7 @@ actor DownloadCache {
     let device = telemetry.register(paths.ready, role: "Predownload")
     guard
       let digest = try await runTransferIO({
-        try digestFile(paths.ready, telemetry: telemetry, device: device)
+        try digestFile(paths.ready, telemetry: telemetry, device: device, isCache: true)
       }), digest.size == request.size, digest.md5 == request.md5.lowercased()
     else {
       return nil
@@ -158,7 +158,7 @@ actor DownloadCache {
         while let data = try await runTransferIO({
           try handle.read(upToCount: 1024 * 1024)
         }), !data.isEmpty {
-          telemetry.read(UInt64(data.count), device: device)
+          telemetry.cacheRead(UInt64(data.count), inMemory: false, device: device)
           try await writer.write(data, at: offset)
           offset += UInt64(data.count)
         }
@@ -199,7 +199,7 @@ actor DownloadCache {
                   return try handle.read(upToCount: count) ?? Data()
                 }
                 guard !data.isEmpty else { throw BinaryCacheError.unexpectedEndOfFile }
-                telemetry.read(UInt64(data.count), device: device)
+                telemetry.cacheRead(UInt64(data.count), inMemory: false, device: device)
                 try await writer.write(data, at: offset)
                 offset += UInt64(data.count)
               }
@@ -273,7 +273,7 @@ actor DownloadCache {
 
     // Another process can finish or evict the payload while this lock is acquired.
     if let digest = try await runTransferIO({
-      try digestFile(paths.ready, telemetry: telemetry, device: device)
+      try digestFile(paths.ready, telemetry: telemetry, device: device, isCache: true)
     }),
       digest.size == request.size, digest.md5 == request.md5.lowercased()
     {
@@ -296,7 +296,9 @@ actor DownloadCache {
             try await Task.sleep(for: .milliseconds(20))
             continue
           }
-          if let digest = try await runTransferIO({ try digestFile(paths.ready) }),
+          if let digest = try await runTransferIO({
+            try digestFile(paths.ready, telemetry: telemetry, device: device, isCache: true)
+          }),
             digest.size == request.size, digest.md5 == request.md5.lowercased()
           {
             telemetry?.ready(request.chunkID)
@@ -308,7 +310,9 @@ actor DownloadCache {
           try await Task.sleep(for: .milliseconds(20))
         }
       }
-      if let digest = try await runTransferIO({ try digestFile(paths.ready) }),
+      if let digest = try await runTransferIO({
+        try digestFile(paths.ready, telemetry: telemetry, device: device, isCache: true)
+      }),
         digest.size == request.size, digest.md5 == request.md5.lowercased()
       {
         try fileLock.makeShared()
@@ -354,7 +358,7 @@ actor DownloadCache {
           }
         }
         let digest = try await runTransferIO {
-          try digestFile(paths.partial, telemetry: telemetry, device: device)
+          try digestFile(paths.partial, telemetry: telemetry, device: device, isCache: true)
         }
         guard digest?.size == request.size, digest?.md5 == request.md5.lowercased() else {
           try await runTransferIO { try context.reset() }
@@ -761,7 +765,7 @@ private final class DownloadContext: @unchecked Sendable {
           } else {
             try data?.seek(toOffset: writeFrom)
             try data?.write(contentsOf: part)
-            telemetry?.write(UInt64(part.count), device: device)
+            telemetry?.cacheWrite(UInt64(part.count), inMemory: false, device: device)
             telemetry?.stored(UInt64(part.count), device: device)
           }
           try append(Record(range: range, bytes: next - base))
@@ -800,7 +804,7 @@ private final class DownloadContext: @unchecked Sendable {
     let offset = try index.offset()
     do {
       try index.write(contentsOf: bytes)
-      telemetry?.write(UInt64(bytes.count), device: device)
+      telemetry?.cacheWrite(UInt64(bytes.count), inMemory: false, device: device)
     } catch {
       try? index.truncate(atOffset: offset)
       try? index.seek(toOffset: offset)

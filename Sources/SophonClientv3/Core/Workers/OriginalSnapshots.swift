@@ -93,7 +93,7 @@ actor OriginalSnapshots {
           try await runTransferIO {
             try digestFile(
               savedURL, telemetry: telemetry,
-              device: telemetry?.register(savedURL, role: "Recovery"))
+              device: telemetry?.register(savedURL, role: "Recovery"), isCache: true)
           }
         }),
         digest.size == source.size, digest.md5 == source.md5.lowercased()

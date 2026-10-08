@@ -45,6 +45,11 @@ public struct SophonDeviceMetrics: Codable, Sendable {
   public let write: SophonMetric
 }
 
+public struct SophonIOMetrics: Codable, Sendable {
+  public let read: SophonMetric
+  public let write: SophonMetric
+}
+
 public struct SophonResourceMetrics: Codable, Sendable {
   public let memoryBytes: UInt64
   public let memoryLimit: UInt64
@@ -52,6 +57,9 @@ public struct SophonResourceMetrics: Codable, Sendable {
   public let diskReservedBytes: UInt64
   public let devices: [SophonDeviceMetrics]
   public let downloads: [DownloadByteProgress]
+  public let memoryCache: SophonIOMetrics
+  public let diskCache: SophonIOMetrics
+  public let target: SophonIOMetrics
 }
 
 public struct SophonMetrics: Codable, Sendable {
@@ -203,6 +211,12 @@ struct SophonMetricsState: Sendable {
   var resourceSource: (@Sendable () -> TransferResourceProgress)?
   private var deviceReads: [String: SophonMeter] = [:]
   private var deviceWrites: [String: SophonMeter] = [:]
+  private var memoryCacheRead = SophonMeter()
+  private var memoryCacheWrite = SophonMeter()
+  private var diskCacheRead = SophonMeter()
+  private var diskCacheWrite = SophonMeter()
+  private var targetRead = SophonMeter()
+  private var targetWrite = SophonMeter()
 
   var now: Double {
     if let ended { return ended }
@@ -252,8 +266,15 @@ struct SophonMetricsState: Sendable {
     guard let source = resourceSource else { return }
     let value = source()
     resources = value
+    memoryCacheRead.set(value.memoryCache.readBytes, at: time)
+    memoryCacheWrite.set(value.memoryCache.writtenBytes, at: time)
+    diskCacheRead.set(value.diskCache.readBytes, at: time)
+    diskCacheWrite.set(value.diskCache.writtenBytes, at: time)
     network.set(value.downloadTotals.values.reduce(0) { $0 + $1.transferredBytes }, at: time)
     read.set(scanReadBytes + value.devices.reduce(0) { $0 + $1.readBytes }, at: time)
+    targetRead.set(read.value - min(read.value, value.diskCache.readBytes), at: time)
+    let written = value.devices.reduce(UInt64(0)) { $0 + $1.writtenBytes }
+    targetWrite.set(written - min(written, value.diskCache.writtenBytes), at: time)
     for device in value.devices {
       deviceReads[device.id, default: SophonMeter()].set(device.readBytes, at: time)
       deviceWrites[device.id, default: SophonMeter()].set(device.writtenBytes, at: time)
@@ -273,6 +294,12 @@ struct SophonMetricsState: Sendable {
     read.finish(at: time)
     write.finish(at: time)
     files.finish(at: time)
+    memoryCacheRead.finish(at: time)
+    memoryCacheWrite.finish(at: time)
+    diskCacheRead.finish(at: time)
+    diskCacheWrite.finish(at: time)
+    targetRead.finish(at: time)
+    targetWrite.finish(at: time)
     for key in deviceReads.keys { deviceReads[key]?.finish(at: time) }
     for key in deviceWrites.keys { deviceWrites[key]?.finish(at: time) }
   }
@@ -288,7 +315,13 @@ struct SophonMetricsState: Sendable {
             cacheBytes: device.cacheBytes, reservedCacheBytes: device.reservedCacheBytes,
             read: deviceReads[device.id, default: SophonMeter()].snapshot(at: time),
             write: deviceWrites[device.id, default: SophonMeter()].snapshot(at: time))
-        }, downloads: value.downloads)
+        }, downloads: value.downloads,
+        memoryCache: SophonIOMetrics(
+          read: memoryCacheRead.snapshot(at: time), write: memoryCacheWrite.snapshot(at: time)),
+        diskCache: SophonIOMetrics(
+          read: diskCacheRead.snapshot(at: time), write: diskCacheWrite.snapshot(at: time)),
+        target: SophonIOMetrics(
+          read: targetRead.snapshot(at: time), write: targetWrite.snapshot(at: time)))
     }
     return SophonMetrics(
       timing: SophonTiming(

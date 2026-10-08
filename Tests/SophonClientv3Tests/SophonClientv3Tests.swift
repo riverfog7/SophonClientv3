@@ -41,9 +41,10 @@ func testStreamedPatchWithCachedInputs(memoryLimit: UInt64) async throws {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
+  let telemetry = TransferTelemetry(memoryLimit: memoryLimit, diskLimit: 2 * 1024 * 1024)
   let cache = try BinaryCache(
     directory: root.appendingPathComponent("cache"), memoryLimit: memoryLimit,
-    diskLimit: 2 * 1024 * 1024, entryLimit: 4)
+    diskLimit: 2 * 1024 * 1024, entryLimit: 4, telemetry: telemetry)
   let originalWriter = try await cache.makeWriter(expectedSize: UInt64(fixture.old.count))
   try await originalWriter.write(fixture.old, at: 0)
   let original = try await originalWriter.finish()
@@ -64,6 +65,13 @@ func testStreamedPatchWithCachedInputs(memoryLimit: UInt64) async throws {
       original: .cached(original), patch: .cached(patch), target: target, outputURL: temporary))
   #expect(try Data(contentsOf: temporary) == fixture.new)
   #expect(try Data(contentsOf: targetURL) == fixture.old)
+  let cacheIO = telemetry.snapshot()
+  let memoryWrites =
+    (original.inMemory ? UInt64(fixture.old.count) : 0)
+    + (patchBundle.inMemory ? UInt64(bundle.count) : 0)
+  #expect(cacheIO.memoryCache.writtenBytes == memoryWrites)
+  #expect(cacheIO.diskCache.writtenBytes == UInt64(fixture.old.count + bundle.count) - memoryWrites)
+  #expect(original.inMemory ? cacheIO.memoryCache.readBytes > 0 : cacheIO.diskCache.readBytes > 0)
 
   let invalidTarget = PlannedUpdateFile(
     fileURL: targetURL, size: target.size, md5: String(repeating: "0", count: 32), installChunks: []
@@ -1283,15 +1291,37 @@ func testTransferReporterMetrics() async throws {
   telemetry.stored(10, device: device)
   telemetry.read(12, device: device)
   telemetry.write(18, device: device)
+  telemetry.cacheRead(7, inMemory: true)
+  telemetry.cacheWrite(9, inMemory: true)
+  telemetry.cacheRead(3, inMemory: false, device: device)
+  telemetry.cacheWrite(5, inMemory: false, device: device)
   // No reporter event announces these I/O updates; the snapshot reads the live counters.
   let live = await update.snapshot().metrics
   #expect(live.patch.data.completed == 50 && live.patch.data.remaining == 50)
   #expect(live.patch.network.completed == 10 && live.patch.retainedBytes == 40)
-  #expect(live.common.network.completed == 10 && live.common.read.completed == 12)
+  #expect(live.common.network.completed == 10 && live.common.read.completed == 15)
   #expect(live.common.resources?.memoryBytes == 20)
   #expect(live.common.resources?.diskReservedBytes == 30)
-  #expect(live.common.resources?.devices.first?.write.completed == 18)
+  #expect(live.common.resources?.devices.first?.write.completed == 23)
   #expect(live.common.resources?.devices.first?.cacheBytes == 10)
+  #expect(live.common.resources?.memoryCache.read.completed == 7)
+  #expect(live.common.resources?.memoryCache.write.completed == 9)
+  #expect(live.common.resources?.diskCache.read.completed == 3)
+  #expect(live.common.resources?.diskCache.write.completed == 5)
+  #expect(live.common.resources?.target.read.completed == 12)
+  #expect(live.common.resources?.target.write.completed == 18)
+  var meters = SophonMetricsState()
+  meters.resourceSource = { telemetry.snapshot() }
+  meters.syncResources(at: 1)
+  let sampled = meters.snapshot(at: 1, eta: nil)
+  #expect(sampled.resources?.memoryCache.read.rate == 7)
+  #expect(sampled.resources?.diskCache.write.rate == 5)
+  let encoded = try #require(
+    JSONSerialization.jsonObject(with: JSONEncoder().encode(live)) as? [String: Any])
+  let resources = try #require(
+    (encoded["common"] as? [String: Any])?["resources"] as? [String: Any])
+  #expect((resources["memoryCache"] as? [String: Any])?["read"] != nil)
+  #expect((resources["diskCache"] as? [String: Any])?["write"] != nil)
   #expect(live.common.metadata.manifests.completed == 2)
   #expect(live.common.metadata.diffManifests.completed == 1)
   #expect(live.common.metadata.manifests.isFinished)

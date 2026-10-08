@@ -28,21 +28,22 @@ enum PatchInput: Sendable {
     }
   }
 
-  func isHDiff() throws -> Bool {
-    let source = try open()
+  func isHDiff(telemetry: TransferTelemetry? = nil) throws -> Bool {
+    let source = try open(telemetry: telemetry)
     var prefix = Data(count: Int(min(16, try source.size)))
     try prefix.withUnsafeMutableBytes { try source.read(at: 0, into: $0) }
     return prefix.starts(with: Data("HDIFF".utf8))
   }
 
-  fileprivate func open() throws -> any HPatchSource {
+  fileprivate func open(telemetry: TransferTelemetry? = nil) throws -> any HPatchSource {
     switch self {
     case .cached(let binary): return try CachedPatchSource(binary)
     case .file(let fileURL, let offset, let size):
-      return try FilePatchSource(fileURL: fileURL, offset: offset, size: size)
+      return try FilePatchSource(fileURL: fileURL, offset: offset, size: size, telemetry: telemetry)
     case .download(let download, let offset, let size):
       return try FilePatchSource(
-        fileURL: download.fileURL, offset: offset, size: size, download: download)
+        fileURL: download.fileURL, offset: offset, size: size, download: download,
+        telemetry: telemetry)
     }
   }
 }
@@ -66,8 +67,8 @@ final class PatchApplyWorker: Sendable {
   }
 
   private static func apply(_ request: PatchApplyRequest) throws {
-    let patch = try request.patch.open()
-    let original = try request.original?.open()
+    let patch = try request.patch.open(telemetry: request.telemetry)
+    let original = try request.original?.open(telemetry: request.telemetry)
     let patchSize = try patch.size
     var prefix = Data(count: Int(min(16, patchSize)))
     try prefix.withUnsafeMutableBytes { try patch.read(at: 0, into: $0) }
@@ -117,11 +118,19 @@ private final class FilePatchSource: HPatchSource, @unchecked Sendable {
   private let handle: FileHandle
   private let lock = NSLock()
   private let download: CachedDownload?
+  private let telemetry: TransferTelemetry?
+  private let device: String
 
-  init(fileURL: URL, offset: UInt64, size: UInt64, download: CachedDownload? = nil) throws {
+  init(
+    fileURL: URL, offset: UInt64, size: UInt64, download: CachedDownload? = nil,
+    telemetry: TransferTelemetry? = nil
+  ) throws {
     self.size = size
     self.offset = offset
     self.download = download
+    self.telemetry = telemetry
+    self.device =
+      telemetry?.register(fileURL, role: download == nil ? "Target" : "Predownload") ?? ""
     handle = try FileHandle(forReadingFrom: fileURL)
     let length = try handle.seekToEnd()
     guard offset <= length, size <= length - offset else {
@@ -147,6 +156,7 @@ private final class FilePatchSource: HPatchSource, @unchecked Sendable {
             else { throw BinaryCacheError.unexpectedEndOfFile }
             data.copyBytes(
               to: UnsafeMutableRawBufferPointer(rebasing: buffer[count..<(count + data.count)]))
+            recordRead(UInt64(data.count))
             count += data.count
           }
         #else
@@ -155,9 +165,18 @@ private final class FilePatchSource: HPatchSource, @unchecked Sendable {
           else { throw BinaryCacheError.unexpectedEndOfFile }
           data.copyBytes(
             to: UnsafeMutableRawBufferPointer(rebasing: buffer[count..<(count + data.count)]))
+          recordRead(UInt64(data.count))
           count += data.count
         #endif
       }
+    }
+  }
+
+  private func recordRead(_ bytes: UInt64) {
+    if download != nil {
+      telemetry?.cacheRead(bytes, inMemory: false, device: device)
+    } else {
+      telemetry?.read(bytes, device: device)
     }
   }
 }
