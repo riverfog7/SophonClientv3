@@ -10,8 +10,6 @@ extension Updater {
     gameID: String = "", mode: GameBranchCategoryScenario = .full, predownload: Bool = false,
     finalize: @escaping @Sendable () throws -> Void = {}
   ) async throws {
-    var settings = settings
-    settings.ioPolicy = settings.ioPolicy ?? .serialized
     let execution = try await UpdateExecution(
       plan: plan, gameDirectory: baseGameDir, settings: settings, downloadCache: downloadCache,
       installer: installer, downloadWorkers: maxCocurrentDownloads,

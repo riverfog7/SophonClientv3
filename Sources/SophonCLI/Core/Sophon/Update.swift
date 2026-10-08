@@ -20,8 +20,8 @@ struct TransferCLIOptions: ParsableArguments, Sendable {
   var noDiskCache = false
   @Option(help: "Maximum queued cache entries.")
   var cacheEntryLimit = 500
-  @Option(help: "Target I/O: serialized by default for updates, parallel for installs.")
-  var ioPolicy: StorageIOPolicy?
+  @Option(help: "Target I/O: parallel (default) or serialized.")
+  var ioPolicy: StorageIOPolicy = .parallel
   @Option(help: "Update output mode: temporary replacement or in-place overwrite.")
   var writeMode: UpdateWriteMode = .temporaryReplacement
   @Flag(
@@ -67,7 +67,7 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
   var cacheAt: String?
   @Option(help: "Installation category scenario: full or base.") var mode = "full"
   @Option(help: "Maximum parallel HTTP range downloads.") var maxConcurrentDownloads = 8
-  @Option(help: "Maximum file patch workers when --io-policy parallel is selected.")
+  @Option(help: "Maximum file patch workers in parallel I/O mode.")
   var maxConcurrentWrites = 4
   @Flag(help: "Print the selected update plan without applying it.") var plan = false
   @Flag(help: "Print append-only summaries instead of updating a terminal dashboard.")
@@ -108,7 +108,7 @@ struct UpdateCLI: AsyncParsableCommand, Sendable {
       title: "\(game) [\(mode)\(predownload ? ", predownload branch" : "")]",
       directory: URL(fileURLWithPath: directory).standardizedFileURL.path,
       cacheAt: cacheAt.map { URL(fileURLWithPath: $0).standardizedFileURL.path },
-      writeMode: settings.writeMode, ioPolicy: settings.ioPolicy ?? .serialized,
+      writeMode: settings.writeMode, ioPolicy: settings.ioPolicy,
       plain: !terminal.interactive, frames: frames.continuation)
     await dashboard.refresh(force: true)
     let operation = Task { [settings] in await command.update(settings, dashboard: dashboard) }

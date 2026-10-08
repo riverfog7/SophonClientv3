@@ -18,8 +18,7 @@ public struct TransferSettings: Codable, Sendable {
   public var diskLimit: UInt64 = 10 * 1024 * 1024 * 1024
   public var diskCacheEnabled = true
   public var entryLimit: Int = 500
-  /// Defaults to serialized target I/O for updates and parallel target I/O for installations.
-  public var ioPolicy: StorageIOPolicy?
+  public var ioPolicy: StorageIOPolicy = .parallel
   public var writeMode: UpdateWriteMode = .temporaryReplacement
   public var preserveState = true
 
@@ -61,7 +60,7 @@ public struct TransferSettings: Codable, Sendable {
     diskCacheEnabled =
       try values.decodeIfPresent(Bool.self, forKey: .diskCacheEnabled) ?? diskCacheEnabled
     entryLimit = try values.decodeIfPresent(Int.self, forKey: .entryLimit) ?? entryLimit
-    ioPolicy = try values.decodeIfPresent(StorageIOPolicy.self, forKey: .ioPolicy)
+    ioPolicy = try values.decodeIfPresent(StorageIOPolicy.self, forKey: .ioPolicy) ?? ioPolicy
     writeMode = try values.decodeIfPresent(UpdateWriteMode.self, forKey: .writeMode) ?? writeMode
     preserveState = try values.decodeIfPresent(Bool.self, forKey: .preserveState) ?? preserveState
   }

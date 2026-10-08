@@ -7,6 +7,7 @@ export interface TransferSettings {
   diskLimit?: number;
   diskCacheEnabled?: boolean;
   entryLimit?: number;
+  /** Target I/O policy; defaults to parallel for installations and updates. */
   ioPolicy?: "parallel" | "serialized";
   writeMode?: "temporary" | "in-place";
   preserveState?: boolean;

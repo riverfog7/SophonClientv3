@@ -576,7 +576,11 @@ func testTransferPredownloadAndRepair(writeMode: UpdateWriteMode, rawPayload: Bo
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
   var settings = try JSONDecoder().decode(TransferSettings.self, from: Data("{}".utf8))
-  #expect(settings.ioPolicy == nil)
+  #expect(settings.ioPolicy == .parallel)
+  #expect(
+    try JSONDecoder().decode(
+      TransferSettings.self, from: Data("{\"ioPolicy\":\"serialized\"}".utf8)
+    ).ioPolicy == .serialized)
   #expect(settings.memoryLimit == 1024 * 1024 * 1024)
   settings.cacheDirectory = root.appendingPathComponent("cache").path
   settings.memoryLimit = 0

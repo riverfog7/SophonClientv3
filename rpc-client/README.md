@@ -30,7 +30,7 @@ const client = await SophonRpcClient.stdio("/path/to/SophonCLI", [
 
 These settings apply to every operation/query in that RPC process and remain fixed until it restarts. Logs append to existing contents; concurrent operations share one file writer. stdout stays reserved for JSON-RPC. A file-open error rejects startup; a later write failure is reported to stderr once and disables file logging while operations continue.
 
-For HTTP, add the same flags to `SophonCLI rpc --transport http ...` when starting the server. All browser clients use that server's settings. Working cache, predownload storage, resume state, budgets, and workers remain per-operation parameters under `transfer`, `downloads`, and `writes`.
+For HTTP, add the same flags to `SophonCLI rpc --transport http ...` when starting the server. All browser clients use that server's settings. Working cache, predownload storage, resume state, budgets, and workers remain per-operation parameters under `transfer`, `downloads`, and `writes`. `transfer.ioPolicy` defaults to `"parallel"` for both installations and updates; select `"serialized"` to serialize target I/O.
 
 ## Yaagl / Neutralino
 
