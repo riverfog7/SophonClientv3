@@ -1583,6 +1583,44 @@ func testTransferRPCReplyPriority() async throws {
 }
 
 @Test
+func testRPCGameConfigScenarioDescriptions() throws {
+  let json = #"""
+    {"launch_configs": [{
+      "game": {"id": "fixture", "biz": "nap_global"},
+      "installation_dir": "Game", "exe_file_name": "Game.exe",
+      "audio_pkg_scan_dir": "", "res_category_dir": "",
+      "wpf_exe_dir": "", "wpf_pkg_version_dir": "",
+      "enable_ldiff": false, "enable_scenario_pkg": true,
+      "enable_write_verify_result": false, "write_verify_result_path": "",
+      "scenario_pkg_info": {
+        "full_pkg_name": "Full version", "full_pkg_desc": "Full\nresources",
+        "base_pkg_name": "Base version", "base_pkg_desc": "Base\nresources"
+      }
+    }]}
+    """#
+  let configs = try JSONDecoder().decode(GameConfigs.self, from: Data(json.utf8))
+  let info = try #require(configs.findBy(biz: "nap_global")?.scenarioPkgInfo)
+  #expect(info.fullPkgName == "Full version")
+  #expect(info.fullPkgDesc == "Full\nresources")
+  #expect(info.basePkgName == "Base version")
+  #expect(info.basePkgDesc == "Base\nresources")
+  let encoded = try JSONEncoder().encode(JSONValue.value(configs))
+  let result = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+  let launchConfigs = try #require(result["launch_configs"] as? [[String: Any]])
+  let scenario = try #require(launchConfigs.first?["scenario_pkg_info"] as? [String: String])
+  #expect(
+    scenario == [
+      "full_pkg_name": "Full version", "full_pkg_desc": "Full\nresources",
+      "base_pkg_name": "Base version", "base_pkg_desc": "Base\nresources",
+    ])
+  var config = try #require(launchConfigs.first)
+  config["scenario_pkg_info"] = NSNull()
+  let unsupported = try JSONDecoder().decode(
+    GameLaunchConfig.self, from: JSONSerialization.data(withJSONObject: config))
+  #expect(unsupported.scenarioPkgInfo == nil)
+}
+
+@Test
 func testTransferRPCUpdateEventEncoding() async throws {
   let buffer = RPCEventBuffer<UpdateEvent>()
   let file = URL(fileURLWithPath: "/rpc-encoding-fixture")

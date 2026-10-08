@@ -1,3 +1,17 @@
+public struct ScenarioPackageInfo: Codable, Sendable {
+  public var fullPkgName: String
+  public var fullPkgDesc: String
+  public var basePkgName: String
+  public var basePkgDesc: String
+
+  enum CodingKeys: String, CodingKey {
+    case fullPkgName = "full_pkg_name"
+    case fullPkgDesc = "full_pkg_desc"
+    case basePkgName = "base_pkg_name"
+    case basePkgDesc = "base_pkg_desc"
+  }
+}
+
 public struct GameLaunchConfig: Codable, Sendable {
   public var game: GameType
   public var installationDir: String
@@ -8,6 +22,7 @@ public struct GameLaunchConfig: Codable, Sendable {
   public var wpfPkgVersionDir: String
   public var enableLdiff: Bool
   public var enableScenarioPkg: Bool
+  public var scenarioPkgInfo: ScenarioPackageInfo?
   public var enableWriteVerifyResult: Bool
   public var writeVerifyResultPath: String
 
@@ -21,6 +36,7 @@ public struct GameLaunchConfig: Codable, Sendable {
     case wpfPkgVersionDir = "wpf_pkg_version_dir"
     case enableLdiff = "enable_ldiff"
     case enableScenarioPkg = "enable_scenario_pkg"
+    case scenarioPkgInfo = "scenario_pkg_info"
     case enableWriteVerifyResult = "enable_write_verify_result"
     case writeVerifyResultPath = "write_verify_result_path"
   }
