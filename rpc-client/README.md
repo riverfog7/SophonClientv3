@@ -30,7 +30,25 @@ const client = await SophonRpcClient.stdio("/path/to/SophonCLI", [
 
 These settings apply to every operation/query in that RPC process and remain fixed until it restarts. Logs append to existing contents; concurrent operations share one file writer. stdout stays reserved for JSON-RPC. A file-open error rejects startup; a later write failure is reported to stderr once and disables file logging while operations continue.
 
-For HTTP, add the same flags to `SophonCLI rpc --transport http ...` when starting the server. All browser clients use that server's settings. Working cache, predownload storage, resume state, budgets, and workers remain per-operation parameters under `transfer`, `downloads`, and `writes`. `transfer.ioPolicy` defaults to `"parallel"` for both installations and updates; select `"serialized"` to serialize target I/O.
+For HTTP, add the same flags to `SophonCLI rpc --transport http ...` when starting the server. All browser clients use that server's settings. Working cache, predownload storage, resume state, budgets, and workers remain per-operation parameters. `transfer.ioPolicy` defaults to `"parallel"` for both installations and updates; `"serialized"` serializes update I/O and installer writes. Installer verification concurrency is controlled by `checks`.
+
+## Operation settings
+
+Pass these optional top-level fields to `install()` or `update()`, alongside `game`, `directory`, and `transfer`:
+
+| Field | Default | Scope |
+| --- | --- | --- |
+| `downloads` | 8 | Concurrent downloads |
+| `writes` | 4 | Installer writes and update patch workers; effectively 1 with serialized I/O |
+| `checks` | 8 | Installer verification workers, each reading and hashing |
+| `postProcessors` | 4 | Installer chunk-processing workers, including update repairs |
+| `maxRetries` | 10 | Additional attempts after the initial request fails; 0 disables retries |
+| `retryInterval` | 5 | Delay between retries, in seconds; 0 allows immediate retries |
+| `maxCachedFileHandles` | 512 | Installer cached output handles, including update repairs |
+
+Worker/handle counts must be positive integers; retry values must be nonnegative integers. `maxCachedFileHandles` must be at least `writes` with parallel I/O, or at least 1 with serialized I/O. Invalid parameters return JSON-RPC error `-32602` before an operation starts.
+
+These settings apply when starting or resuming an operation, without restarting the RPC server. Omitted fields use the defaults above. Retry settings also apply to the initial game-config lookup. Installer verification finishes before writing and honors `checks` under either I/O policy; use `checks: 1` for a single scan reader. Pure update patch concurrency is controlled by `writes`.
 
 ## Yaagl / Neutralino
 

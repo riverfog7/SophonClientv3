@@ -47,15 +47,15 @@ Useful options on `install` and `update`:
 | `--disk-cache-gib N` | 10 | Maximum shared working disk spill in GiB for this operation |
 | `--no-disk-cache` | Off | Disable live working-cache spill; explicit predownloads still use disk |
 | `--cache-entry-limit N` | 500 | Maximum entries admitted to a cache queue |
-| `--io-policy parallel` | Install | Concurrent target file work using configured worker counts |
-| `--io-policy serialized` | Update | One target reader/writer at a time, including repair writes |
+| `--io-policy parallel` | Install and update | Concurrent target file work using configured worker counts |
+| `--io-policy serialized` | Off | Serialized update target I/O and installer writes, including repairs |
 | `--stateless` | Off | Rebuild work from files instead of trusting saved checkpoints |
 
 Originals exceeding the RAM budget spill to disk. In-place originals and originals needed by another update target remain available until their consumers finish. Insufficient working-cache capacity for one live payload and its required input fails with an error. Lowering the disk limit can discard download prefixes to fit the new ceiling; recovery originals are never discarded for capacity. Disabling disk caching discards old working downloads and uses RAM for live data.
 
 These are cache-storage limits, not a process memory cap or a total filesystem quota. RAM reservations cover live payloads, original snapshots, and cached processing output. Manifests, native patch buffers, temporary decompression buffers, and HTTP buffers use additional memory. The disk limit covers shared logical payload reservations, including retained spills and recovery originals. Filesystem allocation, journals/state, target temporary output, and explicit predownloads add disk use.
 
-Updates and installations use parallel target I/O by default. Updates use the configured patch/write worker count, including repair writes. Use `--io-policy serialized` to keep target reads and writes separate, flushing verified output before the next read, while HTTP transfers and cache I/O continue on the cache drive. Installer scanning already precedes target writes. These policies do not measure the hardware or promise a particular throughput.
+Updates and installations use parallel target I/O by default. Updates use the configured patch/write worker count, including repair writes. Use `--io-policy serialized` to keep target reads and writes separate, flushing verified output before the next read, while HTTP transfers and cache I/O continue on the cache drive. Installer scanning precedes target writes and uses the configured check-worker count under either policy. These policies do not measure the hardware or promise a particular throughput.
 
 SIGINT/SIGTERM cancel queued work and drain an active native patch write before exiting. A forced kill retains the last recorded state. Separate processes cannot modify the same game directory concurrently.
 

@@ -237,9 +237,15 @@ struct UpdateStateCLI: AsyncParsableCommand {
 
 func makeOperationClient(
   game: String, directory: String, cn: Bool, transfer: TransferSettings,
-  downloads: Int = 8, writes: Int = 4, manifestCacheDir: String? = nil, logger: Logger? = nil
+  downloads: Int = 8, writes: Int = 4, checks: Int = 8, postProcessors: Int = 4,
+  maxRetries: Int = 10, retryInterval: Int = 5, maxCachedFileHandles: Int = 512,
+  manifestCacheDir: String? = nil, logger: Logger? = nil
 ) async throws -> SophonClientv3 {
-  let api = HYPAPIClientManager.shared.getClient(isCN: cn)
+  let api = try HYPAPIClient(
+    baseURL: cn ? HYPAPI_CN_BASE_URL : HYPAPI_OS_BASE_URL,
+    sophonBaseURL: cn ? SOPHON_API_CN_BASE_URL : SOPHON_API_OS_BASE_URL,
+    launcherID: cn ? HYPAPI_CN_LAUNCHER_ID : HYPAPI_OS_LAUNCHER_ID,
+    maxRetries: maxRetries, retryInterval: retryInterval)
   let config = try resolveHYPGame(game, in: await api.getGameConfigs())
   let manifests =
     FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
@@ -247,11 +253,14 @@ func makeOperationClient(
   let settings = SophonClientSettings(
     baseURL: cn ? HYPAPI_CN_BASE_URL : HYPAPI_OS_BASE_URL,
     sophonBaseURL: cn ? SOPHON_API_CN_BASE_URL : SOPHON_API_OS_BASE_URL,
+    maxRetries: maxRetries, retryInterval: retryInterval,
     launcherID: cn ? HYPAPI_CN_LAUNCHER_ID : HYPAPI_OS_LAUNCHER_ID,
     gameID: config.game.id,
     manifestCacheDir: manifestCacheDir
       ?? manifests.appendingPathComponent("SophonClientv3/manifests").path,
-    logStdout: false, maxCocurrentDownloads: downloads, maxCocurrentWrites: writes,
+    logStdout: false, maxCocurrentChecks: checks, maxCocurrentDownloads: downloads,
+    maxCocurrentPostProcessors: postProcessors, maxCocurrentWrites: writes,
+    maxCachedFileHandles: maxCachedFileHandles,
     transfer: transfer)
   return try await SophonClientv3(
     settings, baseGameDir: URL(fileURLWithPath: directory), logger: logger)

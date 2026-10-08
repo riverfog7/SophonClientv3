@@ -72,7 +72,7 @@ private struct RPCFailure: Error {
   let message: String
 }
 
-private struct RPCOperationParameters: Decodable, Sendable {
+struct RPCOperationParameters: Decodable, Sendable {
   let game: String
   let directory: String
   let sourceVersion: String?
@@ -83,11 +83,16 @@ private struct RPCOperationParameters: Decodable, Sendable {
   let voicePacks: [String]
   let downloads: Int
   let writes: Int
+  let checks: Int
+  let postProcessors: Int
+  let maxRetries: Int
+  let retryInterval: Int
+  let maxCachedFileHandles: Int
   let transfer: TransferSettings
 
   enum CodingKeys: String, CodingKey {
     case game, directory, sourceVersion, cn, mode, predownload, cacheOnly, voicePacks, downloads,
-      writes,
+      writes, checks, postProcessors, maxRetries, retryInterval, maxCachedFileHandles,
       transfer
   }
 
@@ -103,13 +108,22 @@ private struct RPCOperationParameters: Decodable, Sendable {
     voicePacks = try values.decodeIfPresent([String].self, forKey: .voicePacks) ?? []
     downloads = try values.decodeIfPresent(Int.self, forKey: .downloads) ?? 8
     writes = try values.decodeIfPresent(Int.self, forKey: .writes) ?? 4
+    checks = try values.decodeIfPresent(Int.self, forKey: .checks) ?? 8
+    postProcessors = try values.decodeIfPresent(Int.self, forKey: .postProcessors) ?? 4
+    maxRetries = try values.decodeIfPresent(Int.self, forKey: .maxRetries) ?? 10
+    retryInterval = try values.decodeIfPresent(Int.self, forKey: .retryInterval) ?? 5
+    maxCachedFileHandles =
+      try values.decodeIfPresent(Int.self, forKey: .maxCachedFileHandles) ?? 512
     transfer =
       try values.decodeIfPresent(TransferSettings.self, forKey: .transfer) ?? TransferSettings()
     guard ["full", "base"].contains(mode), downloads > 0, writes > 0,
+      checks > 0, postProcessors > 0, maxRetries >= 0, retryInterval >= 0,
+      maxCachedFileHandles >= (transfer.ioPolicy == .serialized ? 1 : writes),
       transfer.entryLimit > 0, !transfer.diskCacheEnabled || transfer.diskLimit > 0,
       !directory.isEmpty
     else {
-      throw RPCFailure(code: -32602, message: "Invalid scenario or worker/cache count")
+      throw RPCFailure(
+        code: -32602, message: "Invalid scenario, worker/cache count, or retry settings")
     }
   }
 }
@@ -385,6 +399,9 @@ actor RPCDispatcher {
     try await makeOperationClient(
       game: params.game, directory: params.directory, cn: params.cn,
       transfer: params.transfer, downloads: params.downloads, writes: params.writes,
+      checks: params.checks, postProcessors: params.postProcessors,
+      maxRetries: params.maxRetries, retryInterval: params.retryInterval,
+      maxCachedFileHandles: params.maxCachedFileHandles,
       manifestCacheDir: settings.manifestCacheDir, logger: settings.logger)
   }
 

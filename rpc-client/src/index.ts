@@ -24,6 +24,16 @@ export interface OperationParameters {
   voicePacks?: string[];
   downloads?: number;
   writes?: number;
+  /** Installer verification workers (reading and hashing); defaults to 8. */
+  checks?: number;
+  /** Installer chunk-processing workers; defaults to 4. */
+  postProcessors?: number;
+  /** Additional retry attempts after the initial attempt; defaults to 10. */
+  maxRetries?: number;
+  /** Delay between retries, in seconds; defaults to 5. */
+  retryInterval?: number;
+  /** Installer cached output handles; defaults to 512, at least the effective write-worker count. */
+  maxCachedFileHandles?: number;
   transfer?: TransferSettings;
 }
 

@@ -86,8 +86,7 @@ public final class SophonClientv3: @unchecked Sendable {
       cachedSource: self.predownloadCache)
     self.installer = try Installer(
       baseGameDir: self.baseGameDir,
-      maxCocurrentChecks: settings.transfer.ioPolicy == .serialized
-        ? 1 : settings.maxCocurrentChecks,
+      maxCocurrentChecks: settings.maxCocurrentChecks,
       maxCocurrentDownloads: settings.maxCocurrentDownloads,
       maxCocurrentPostProcessors: settings.maxCocurrentPostProcessors,
       maxCocurrentWrites: settings.transfer.ioPolicy == .serialized

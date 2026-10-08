@@ -4,9 +4,11 @@ import Testing
 
 @testable import enum SophonCLI.JSONValue
 @testable import struct SophonCLI.RPCCLI
+@testable import class SophonCLI.RPCDispatcher
 @testable import class SophonCLI.RPCEventBuffer
 @testable import class SophonCLI.RPCLogStream
 @testable import struct SophonCLI.RPCNotification
+@testable import struct SophonCLI.RPCOperationParameters
 @testable import class SophonCLI.RPCOutput
 @testable import class SophonCLI.RPCProgressFeed
 @testable import struct SophonCLI.RPCSessionSettings
@@ -1714,6 +1716,63 @@ func testTransferRPCTransports(transport: String) async throws {
   let logs = try String(contentsOf: logFile, encoding: .utf8)
   #expect(logs.contains("RPC server started") && logs.contains("RPC request"))
   #expect(logs.contains("transport=\(transport)") && logs.contains("method=rpc.discover"))
+}
+
+@Test
+func testTransferRPCOperationParameters() async throws {
+  let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let base: [String: JSONValue] = ["game": .string("fixture"), "directory": .string(root.path)]
+  func decode(_ values: [String: JSONValue]) throws -> RPCOperationParameters {
+    try JSONDecoder().decode(
+      RPCOperationParameters.self,
+      from: JSONEncoder().encode(JSONValue.object(base.merging(values) { _, new in new })))
+  }
+  let defaults = try decode([:])
+  #expect(defaults.checks == 8 && defaults.postProcessors == 4)
+  #expect(defaults.maxRetries == 10 && defaults.retryInterval == 5)
+  #expect(defaults.maxCachedFileHandles == 512)
+  let custom = try decode([
+    "checks": .integer(2), "postProcessors": .integer(3),
+    "maxRetries": .integer(0), "retryInterval": .integer(0),
+    "writes": .integer(7), "maxCachedFileHandles": .integer(7),
+  ])
+  #expect(custom.checks == 2 && custom.postProcessors == 3)
+  #expect(custom.maxRetries == 0 && custom.retryInterval == 0)
+  #expect(custom.writes == 7 && custom.maxCachedFileHandles == 7)
+  let serialized = try decode([
+    "checks": .integer(3), "writes": .integer(7), "maxCachedFileHandles": .integer(1),
+    "transfer": .object(["ioPolicy": .string("serialized")]),
+  ])
+  #expect(serialized.checks == 3 && serialized.writes == 7 && serialized.maxCachedFileHandles == 1)
+
+  var invalid: [(String, JSONValue)] = [
+    ("maxRetries", .integer(-1)), ("retryInterval", .integer(-1)),
+    ("maxCachedFileHandles", .integer(3)), ("writes", .integer(513)),
+  ]
+  for key in ["checks", "postProcessors", "maxCachedFileHandles", "downloads", "writes"] {
+    invalid.append((key, .integer(0)))
+    invalid.append((key, .integer(-1)))
+  }
+  for key in ["checks", "postProcessors", "maxRetries", "retryInterval", "maxCachedFileHandles"] {
+    for value in [JSONValue.bool(true), .string("2"), .decimal(1.5), .unsigned(UInt64.max)] {
+      invalid.append((key, value))
+    }
+  }
+  let dispatcher = RPCDispatcher(settings: try RPCSessionSettings(manifestCacheDir: root.path))
+  for (key, value) in invalid {
+    for method in ["install.start", "update.start", "update.plan"] {
+      let request = try JSONEncoder().encode(
+        JSONValue.object([
+          "jsonrpc": .string("2.0"), "id": .integer(1), "method": .string(method),
+          "params": .object(base.merging([key: value]) { _, new in new }),
+        ]))
+      let data = try #require(await dispatcher.handle(request))
+      let reply = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+      #expect((reply["error"] as? [String: Any])?["code"] as? Int == -32602)
+      #expect(reply["result"] == nil)
+    }
+  }
 }
 
 @Test
