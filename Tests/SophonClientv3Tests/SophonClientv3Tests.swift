@@ -966,33 +966,32 @@ func testTransferVersionAndActionDecision() throws {
   #expect(
     decideGameAction(
       installed: older, live: live, future: future, installation: nil, update: nil,
-      futureCached: false, supportsPatches: true
+      futureCached: false
     ).action == .update)
   #expect(
     decideGameAction(
       installed: current, live: live, future: future, installation: nil, update: nil,
-      futureCached: false, supportsPatches: true
+      futureCached: false
     ).action == .cacheUpdate)
   #expect(
     decideGameAction(
       installed: current, live: live, future: future, installation: nil, update: nil,
-      futureCached: true, supportsPatches: true
+      futureCached: true
     ).action == .none)
   #expect(
     decideGameAction(
       installed: ahead, live: live, future: future, installation: nil, update: nil,
-      futureCached: false, supportsPatches: true
+      futureCached: false
     ).action == .none)
-  // ZZZ advertises diff tags even though its launch config disables incremental patches.
   #expect(
     decideGameAction(
-      installed: older, live: live, future: future, installation: nil, update: nil,
-      futureCached: false, supportsPatches: false
+      installed: older, live: try branch("2", from: []), future: future, installation: nil,
+      update: nil, futureCached: false
     ).action == .install)
   #expect(
     decideGameAction(
-      installed: current, live: live, future: future, installation: nil, update: nil,
-      futureCached: false, supportsPatches: false
+      installed: current, live: live, future: try branch("3", from: []), installation: nil,
+      update: nil, futureCached: false
     ).action == .none)
   let installedPacks = ["en-us", "ko-kr"]
   for version in [
@@ -1000,7 +999,7 @@ func testTransferVersionAndActionDecision() throws {
   ] {
     let action = decideGameAction(
       installed: version, live: live, future: future, installation: nil, update: nil,
-      futureCached: false, supportsPatches: true, voicePacks: installedPacks)
+      futureCached: false, voicePacks: installedPacks)
     #expect(action.voicePacks == installedPacks)
   }
   let installation = SavedInstallationState(
@@ -1010,7 +1009,7 @@ func testTransferVersionAndActionDecision() throws {
     completedApplications: [], trimmedFiles: [], finished: false)
   let installAction = decideGameAction(
     installed: older, live: live, future: future, installation: installation, update: nil,
-    futureCached: false, supportsPatches: true, voicePacks: installedPacks)
+    futureCached: false, voicePacks: installedPacks)
   #expect(installAction.voicePacks == ["en-us", "ja-jp", "ko-kr"])
   let plan = UpdatePlan(
     sourceVersion: "1", targetVersion: "2", patchBundles: [], installFiles: [], deleteFiles: [])
@@ -1022,7 +1021,7 @@ func testTransferVersionAndActionDecision() throws {
   #expect(
     decideGameAction(
       installed: current, live: live, future: future, installation: nil, update: writing,
-      futureCached: false, supportsPatches: true
+      futureCached: false
     ).action == .resumeUpdate)
   let liveCache = SavedUpdateState(
     gameID: "fixture", mode: .full, predownload: false, cacheOnly: true,
@@ -1030,14 +1029,14 @@ func testTransferVersionAndActionDecision() throws {
     finished: false)
   let resumeCache = decideGameAction(
     installed: older, live: live, future: future, installation: nil, update: liveCache,
-    futureCached: false, supportsPatches: true)
+    futureCached: false)
   #expect(resumeCache.action == .resumeUpdate)
   #expect(resumeCache.cacheOnly)
   let obsolete = try branch("3", from: ["2"])
   #expect(
     decideGameAction(
       installed: current, live: obsolete, future: nil, installation: nil, update: writing,
-      futureCached: false, supportsPatches: true
+      futureCached: false
     ).action == .install)
   let cachePlan = UpdatePlan(
     sourceVersion: "2", targetVersion: "3", patchBundles: [], installFiles: [], deleteFiles: [])
@@ -1048,7 +1047,7 @@ func testTransferVersionAndActionDecision() throws {
   #expect(
     decideGameAction(
       installed: current, live: live, future: future, installation: nil, update: caching,
-      futureCached: false, supportsPatches: true
+      futureCached: false
     ).cacheOnly)
 }
 

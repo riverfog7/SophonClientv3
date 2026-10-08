@@ -59,7 +59,7 @@ internal func resolveInstalledVersion(
 internal func decideGameAction(
   installed: InstalledVersion, live: GameSubBranch, future: GameSubBranch?,
   installation: SavedInstallationState?, update: SavedUpdateState?, futureCached: Bool,
-  supportsPatches: Bool, voicePacks: [String] = []
+  voicePacks: [String] = []
 ) -> GameAction {
   if let installation, !installation.finished {
     if installation.version == live.tag {
@@ -105,18 +105,16 @@ internal func decideGameAction(
         .none, source: source, target: source, voicePacks: voicePacks,
         reason: "The future version is already installed")
     }
-    if supportsPatches, live.diffTags.contains(source) {
+    if live.diffTags.contains(source) {
       return GameAction(
         .update, source: source, target: live.tag, voicePacks: voicePacks,
         reason: "A direct update to the live version is available")
     }
     return GameAction(
       .install, source: source, target: live.tag, voicePacks: voicePacks,
-      reason: supportsPatches
-        ? "No direct update is advertised; use the installation manifest"
-        : "Incremental patches are disabled; use the installation manifest")
+      reason: "No direct update is advertised; use the installation manifest")
   }
-  if supportsPatches, let future, future.tag != live.tag, future.diffTags.contains(source),
+  if let future, future.tag != live.tag, future.diffTags.contains(source),
     !futureCached
   {
     return GameAction(

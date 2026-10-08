@@ -121,10 +121,6 @@ public final class SophonClientv3: @unchecked Sendable {
     sourceVersion: String? = nil, mode: GameBranchCategoryScenario = .full,
     predownload: Bool = false, reporter: UpdateReporter? = nil
   ) async throws -> UpdatePlan {
-    guard gameLaunchConfig.enableLdiff else {
-      throw SophonClientError.UnsupportedManifestConfiguration(
-        "This game does not support incremental patches")
-    }
     let branch = try await selectedBranch(predownload: predownload)
     let sourceVersion = try await updateSourceVersion(sourceVersion)
     if sourceVersion == branch.tag {
@@ -262,7 +258,6 @@ public final class SophonClientv3: @unchecked Sendable {
     return decideGameAction(
       installed: installed, live: live, future: future,
       installation: ownInstall, update: ownUpdate, futureCached: futureCached,
-      supportsPatches: gameLaunchConfig.enableLdiff,
       voicePacks: try getInstalledVoicePacks().sorted())
   }
 
